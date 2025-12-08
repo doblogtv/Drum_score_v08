@@ -1,0 +1,7 @@
+data/
+__pycache__/
+Mov/
+*.json
+*.wav
+*.mp4
+*.mov
