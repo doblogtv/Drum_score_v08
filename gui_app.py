@@ -7,7 +7,7 @@ import json
 
 from score import Score
 from synth import DrumSynth
-from exporter import render_score_to_wav  # ★ 追加：WAV出力専用モジュール
+from exporter import render_score_to_wav, render_score_to_movie  # WAV & Movie 出力専用モジュール
 
 APP_VERSION = "0.7"
 CONFIG_FILE = os.path.join(os.getcwd(), "drum_app_config.json")
@@ -159,7 +159,7 @@ class DrumApp:
         wav_button = tk.Button(top_frame, text="🎧 WAV出力", command=self.on_export_wav)
         wav_button.pack(side=tk.LEFT, padx=5)
 
-        # 🎬 ムービー出力ボタン（現状はスタブのまま）
+        # 🎬 ムービー出力ボタン（譜面キャンバスのみ録画）
         export_button = tk.Button(top_frame, text="🎬 出力", command=self.on_export_movie)
         export_button.pack(side=tk.LEFT, padx=5)
 
@@ -973,31 +973,109 @@ class DrumApp:
             messagebox.showerror("エラー", f"WAV出力に失敗しました。\n{e}")
 
     # ----------------------------
-    # ムービー出力（スタブ）
+    # ムービー出力（譜面キャンバスのみ）
     # ----------------------------
     def on_export_movie(self):
         """
-        ここでは UI だけ実装。
-        実際のムービー出力は、今後 exporter.py 側に
-        機能を追加していく想定。
+        ・現在の Score をもとにオフラインで WAV を合成
+        ・譜面キャンバスのみをキャプチャしてフレーム列を生成
+        ・exporter.render_score_to_movie() で音声と合成して mp4 を出力
+
+        必要ライブラリ:
+          pip install pillow moviepy numpy
         """
         if self.is_playing:
             messagebox.showinfo("情報", "再生中はムービー出力できません。停止してから実行してください。")
             return
 
-        msg = (
-            "ムービー出力機能は、現在 UI と設定項目だけ実装された状態です。\n\n"
-            "・出力先フォルダ: \n"
-            f"    {self.movie_output_dir}\n"
-            f"・Loop 再生回数（予定）: {self.loop_record_count} 回分\n\n"
-            "実際に動画を書き出すには、\n"
-            " 1) exporter.py 側でオフライン描画＋音声mux処理を実装\n"
-            " 2) Canvas をフレームごとに画像として保存\n"
-            " 3) moviepy などで音声と合成\n"
-            "が必要なので、次のステップで一緒に詰めていきましょう。"
+        # 依存ライブラリのチェック（Pillow）
+        try:
+            from PIL import ImageGrab
+        except ImportError:
+            messagebox.showerror(
+                "エラー",
+                "Pillow がインストールされていません。\n\n"
+                "  pip install pillow\n\n"
+                "を実行してから再試行してください。"
+            )
+            return
+
+        # 保存先ファイル名の初期値
+        if self.current_filename:
+            base, _ = os.path.splitext(self.current_filename)
+            default_name = base + ".mp4"
+        elif self.score.title:
+            base = self.score.title.replace(" ", "_")
+            default_name = base + ".mp4"
+        else:
+            default_name = "drum_score_movie.mp4"
+
+        initial_dir = self.movie_output_dir if os.path.isdir(self.movie_output_dir) else os.getcwd()
+
+        movie_path = filedialog.asksaveasfilename(
+            title="ムービーを書き出す (mp4)",
+            initialdir=initial_dir,
+            initialfile=default_name,
+            defaultextension=".mp4",
+            filetypes=[("MP4 files", "*.mp4"), ("All files", "*.*")],
         )
-        print("[INFO] Movie export requested (stub only).")
-        messagebox.showinfo("ムービー出力（未実装）", msg)
+        if not movie_path:
+            return
+
+        loop_count = self.loop_record_count if self.loop_record_count > 0 else 1
+
+        # キャンバスのスクリーン座標（ここだけ録画 → メニューバー等は映らない）
+        self.root.update_idletasks()
+        x = self.canvas.winfo_rootx()
+        y = self.canvas.winfo_rooty()
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        bbox = (x, y, x + w, y + h)
+
+        # capture_frame: step_index -> Image
+        def capture_frame(step_index: int):
+            self.highlight_step(step_index)
+            self.root.update_idletasks()
+            self.root.update()
+            return ImageGrab.grab(bbox=bbox)
+
+        # 念のため開始前にハイライトを消す
+        self.clear_highlight()
+        self.root.update_idletasks()
+        self.root.update()
+
+        try:
+            render_score_to_movie(
+                score=self.score,
+                synth=self.synth,
+                loop_count=loop_count,
+                capture_frame=capture_frame,
+                movie_path=movie_path,
+                fps=30,
+            )
+        except ImportError as e:
+            # moviepy / numpy が無い場合など
+            print("[ERROR] Movie export failed (ImportError).")
+            print(e)
+            messagebox.showerror(
+                "エラー",
+                "ムービー出力に必要なライブラリが不足しています。\n\n"
+                "  pip install moviepy numpy\n\n"
+                "を実行してから再試行してください。"
+            )
+            return
+        except Exception as e:
+            print("[ERROR] Movie export failed.")
+            print(e)
+            messagebox.showerror("エラー", f"ムービー出力中にエラーが発生しました。\n{e}")
+            return
+        finally:
+            # 終了後はハイライトを消す
+            self.clear_highlight()
+            self.root.update_idletasks()
+            self.root.update()
+
+        messagebox.showinfo("情報", f"ムービーを書き出しました。\n{movie_path}")
 
     # ----------------------------
     # 設定ウインドウ
