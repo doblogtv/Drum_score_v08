@@ -1,0 +1,19 @@
+FILENAME=Sample_EnkaGroove_2bars.txt
+TITLE=Sample 4 - Enka Style Groove (2 bars)
+TEMPO=72
+TIME=4/4
+PULSES_PER_BEAT=4
+
+# HH：流れる8分刻み（x2 を8個で16ステップ）
+HH:  x2 x2 x2 x2 x2 x2 x2 x2 |
+     x2 x2 x2 x2 x2 x2 x2 x2
+
+# SD：2拍目と4拍目にアクセント（f）
+# 1バー = -4 x1^f -3  -4 x1^f -3 = 16 ステップ
+SD:  -4 x1^f -3   -4 x1^f -3 |
+     -4 x1^f -3   -4 x1^f -3
+
+# BD：演歌の特徴的キック（1拍裏・3拍裏）
+# 1バー = -1 x1 -7 x1 -6 = 16 ステップ
+BD:  -1 x1 -7 x1 -6 |
+     -1 x1 -7 x1 -6

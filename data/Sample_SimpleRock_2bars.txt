@@ -1,0 +1,19 @@
+FILENAME=Sample_SimpleRock_2bars.txt
+TITLE=Sample 1 - Simple Rock Groove (2 bars)
+TEMPO=100
+TIME=4/4
+PULSES_PER_BEAT=4
+
+# HH: 2小節ぶん16分刻み
+HH:  x1 x1 x1 x1 x1 x1 x1 x1  x1 x1 x1 x1 x1 x1 x1 x1 |
+     x1 x1 x1 x1 x1 x1 x1 x1  x1 x1 x1 x1 x1 x1 x1 x1
+
+# SD: 2拍目・4拍目のバックビート
+# 1小節 = -4 x1 -3  -4 x1 -3  → 4+1+3+4+1+3 = 16
+SD:  -4 x1^f -3   -4 x1^f -3 |
+     -4 x1^f -3   -4 x1^f -3
+
+# BD: 1拍目と3拍目のキック
+# 1小節 = x1 -3 -4 x1 -3 -4 → 1+3+4+1+3+4 = 16
+BD:  x1 -3 -4 x1 -3 -4 |
+     x1 -3 -4 x1 -3 -4

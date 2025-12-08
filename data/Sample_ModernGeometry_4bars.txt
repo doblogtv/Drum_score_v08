@@ -1,0 +1,27 @@
+FILENAME=Sample_ModernGeometry_4bars.txt
+TITLE=Sample 3 - Geometric Modern Pattern (4 bars)
+TEMPO=96
+TIME=4/4
+PULSES_PER_BEAT=4
+
+# HH: 各バーが異なるブロック構造
+# Bar1: (x3 -1)×4
+# Bar2: (x1 -3)×4
+# Bar3: (x2 -2)×4
+# Bar4: x4×4
+HH:  x3 -1  x3 -1  x3 -1  x3 -1 |
+     x1 -3  x1 -3  x1 -3  x1 -3 |
+     x2 -2  x2 -2  x2 -2  x2 -2 |
+     x4 x4 x4 x4
+
+# SD: HHと補完し合うパターン
+SD:  -1 x3  -1 x3  -1 x3  -1 x3 |
+     x1 -3  x1 -3  x1 -3  x1 -3 |
+     -2 x2  -2 x2  -2 x2  -2 x2 |
+     -4 -4 -4 -4
+
+# BD: 位相をずらした反復
+BD:  x1 -1 x1 -1 x1 -1 x1 -1  x1 -1 x1 -1 x1 -1 x1 -1 |
+     -2 x2  -2 x2  -2 x2  -2 x2 |
+     x4 -4  x4 -4 |
+     -8 x2 -2 x2 -2

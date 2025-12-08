@@ -1,0 +1,31 @@
+FILENAME=Sample_ComplexGroove_4bars.txt
+TITLE=Sample 2 - Neo-Soul Ghost Groove (4 bars)
+TEMPO=82
+TIME=4/4
+PULSES_PER_BEAT=4
+
+# HH: 4小節ぶん16分刻み
+HH:  x1 x1 x1 x1 x1 x1 x1 x1   x1 x1 x1 x1 x1 x1 x1 x1 |
+     x1 x1 x1 x1 x1 x1 x1 x1   x1 x1 x1 x1 x1 x1 x1 x1 |
+     x1 x1 x1 x1 x1 x1 x1 x1   x1 x1 x1 x1 x1 x1 x1 x1 |
+     x1 x1 x1 x1 x1 x1 x1 x1   x1 x1 x1 x1 x1 x1 x1 x1
+
+# SD: バーごとにゴースト＋アクセントを変化
+# Bar1 = -4 x1^f -3  -4 x1^f -3                (16)
+# Bar2 = -4 x1^f o1^pp -2  -4 x1^f o1^pp -2    (16)
+# Bar3 = -2 o1^pp x1^f -2  -2 o1^pp x1^f -2 -4 (16)
+# Bar4 = -4 x1^f -3  -2 o1^pp x1^f -2 -2       (16)
+SD:  -4 x1^f -3   -4 x1^f -3 |
+     -4 x1^f o1^pp -2   -4 x1^f o1^pp -2 |
+     -2 o1^pp x1^f -2   -2 o1^pp x1^f -2 -4 |
+     -4 x1^f -3   -2 o1^pp x1^f -2 -2
+
+# BD: シンコペーションと幾何パターン
+# Bar1 = x1 -3 -4 x1 -3 -4                      (16)
+# Bar2 = (x1 -1)×8                              (16)
+# Bar3 = (-2 x2)×4                              (16)
+# Bar4 = -8 x2 -2 x2 -2                         (16)
+BD:  x1 -3 -4 x1 -3 -4 |
+     x1 -1 x1 -1 x1 -1 x1 -1  x1 -1 x1 -1 x1 -1 x1 -1 |
+     -2 x2  -2 x2  -2 x2  -2 x2 |
+     -8 x2 -2 x2 -2
