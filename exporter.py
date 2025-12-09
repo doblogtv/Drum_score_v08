@@ -1,4 +1,3 @@
-# exporter.py
 import wave
 import struct
 from typing import Dict, Tuple, List, Callable
@@ -107,7 +106,8 @@ def render_score_to_wav(
         sd_level = 0
         bd_level = 0
 
-        for i, track in enumerate(score.tracks[:3]):  # HH, SD, BD の3トラック想定
+        # HH, SD, BD の3トラック想定
+        for i, track in enumerate(score.tracks[:3]):
             level = 0
             for ev in track.events:
                 if ev.symbol == "rest":
@@ -178,18 +178,36 @@ def render_score_to_movie(
     capture_frame: Callable[[int], "object"],  # step_index -> PIL.Image.Image 相当
     movie_path: str,
     fps: int = 30,
+    video_codec: str | None = None,   # ← None なら拡張子から自動決定
+    audio_codec: str | None = None,
 ) -> None:
     """
     - score / synth / loop_count からオフラインで音声WAVを作る
     - capture_frame(step_index) を呼びながらフレーム列を集める
-    - moviepy で音声と合成して mp4 を書き出す
+    - moviepy で音声と合成して動画を書き出す
 
-    capture_frame は「譜面上の step_index (0〜total_steps_one_loop-1) を受け取って、
-    その状態の画像(PIL.Image)を返す」関数。
-    Tk / ImageGrab 依存は gui_app 側に閉じ込める。
+    拡張子でおおよそこう決める：
+      *.wmv → video: wmv2,  audio: wmav2  （WMP互換重視）
+      *.avi → video: mpeg4, audio: libmp3lame
+      その他（*.mp4 等）→ video: libx264, audio: aac
     """
-    from moviepy.editor import ImageSequenceClip, AudioFileClip
+    from moviepy import ImageSequenceClip, AudioFileClip
     import numpy as np
+    import tempfile
+    import os
+
+    # ---- ここで拡張子からコーデック自動決定 ----
+    lower = movie_path.lower()
+    if video_codec is None or audio_codec is None:
+        if lower.endswith(".wmv"):
+            video_codec = video_codec or "wmv2"
+            audio_codec = audio_codec or "wmav2"
+        elif lower.endswith(".avi"):
+            video_codec = video_codec or "mpeg4"
+            audio_codec = audio_codec or "libmp3lame"
+        else:  # デフォルトは MP4/H.264 + AAC 想定
+            video_codec = video_codec or "libx264"
+            audio_codec = audio_codec or "aac"
 
     if loop_count <= 0:
         loop_count = 1
@@ -219,7 +237,6 @@ def render_score_to_movie(
             loop_count=loop_count,
         )
 
-        # 念のため、譜面側/音声側の duration の短い方に合わせる
         effective_duration = min(total_duration_sec, audio_duration)
         frame_count = max(1, int(effective_duration * fps))
 
@@ -227,10 +244,14 @@ def render_score_to_movie(
             f"[INFO] Movie: duration≈{effective_duration:.2f} sec, "
             f"fps={fps}, frames={frame_count}"
         )
+        print(
+            f"[INFO] Movie: codec={video_codec}, audio_codec={audio_codec}, "
+            f"path={movie_path}"
+        )
 
-        frames = []
+        frames: List["np.ndarray"] = []
         for i in range(frame_count):
-            t = i / fps  # [sec]
+            t = i / fps  # sec
             global_step = int(t / step_duration_sec)
             if global_step >= total_steps_all:
                 break
@@ -242,24 +263,24 @@ def render_score_to_movie(
         if not frames:
             raise RuntimeError("フレームが1枚も生成されませんでした。")
 
-        clip = ImageSequenceClip(frames, fps=fps)
+        video_clip = ImageSequenceClip(frames, fps=fps)
         audio_clip = AudioFileClip(tmp_wav_path)
-        clip = clip.set_audio(audio_clip)
+        final_clip = video_clip.with_audio(audio_clip)
 
-        clip.write_videofile(
+        final_clip.write_videofile(
             movie_path,
-            codec="libx264",
-            audio_codec="aac",
+            codec=video_codec,
+            audio_codec=audio_codec,
             fps=fps,
         )
 
         audio_clip.close()
-        clip.close()
+        final_clip.close()
     finally:
-        # 一時WAVは削除
         try:
             os.remove(tmp_wav_path)
         except Exception:
             pass
 
     print(f"[INFO] Movie: saved to {movie_path}")
+

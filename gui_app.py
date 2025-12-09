@@ -1,4 +1,3 @@
-# gui_app.py
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from typing import Optional, Dict, List
@@ -979,7 +978,7 @@ class DrumApp:
         """
         ・現在の Score をもとにオフラインで WAV を合成
         ・譜面キャンバスのみをキャプチャしてフレーム列を生成
-        ・exporter.render_score_to_movie() で音声と合成して mp4 を出力
+        ・exporter.render_score_to_movie() で音声と合成して動画を書き出す
 
         必要ライブラリ:
           pip install pillow moviepy numpy
@@ -1000,24 +999,29 @@ class DrumApp:
             )
             return
 
-        # 保存先ファイル名の初期値
+        # デフォルト拡張子を .wmv に変更
         if self.current_filename:
             base, _ = os.path.splitext(self.current_filename)
-            default_name = base + ".mp4"
+            default_name = base + ".wmv"
         elif self.score.title:
             base = self.score.title.replace(" ", "_")
-            default_name = base + ".mp4"
+            default_name = base + ".wmv"
         else:
-            default_name = "drum_score_movie.mp4"
+            default_name = "drum_score_movie.wmv"
 
         initial_dir = self.movie_output_dir if os.path.isdir(self.movie_output_dir) else os.getcwd()
 
         movie_path = filedialog.asksaveasfilename(
-            title="ムービーを書き出す (mp4)",
+            title="ムービーを書き出す",
             initialdir=initial_dir,
             initialfile=default_name,
-            defaultextension=".mp4",
-            filetypes=[("MP4 files", "*.mp4"), ("All files", "*.*")],
+            defaultextension=".wmv",
+            filetypes=[
+                ("WMV files", "*.wmv"),
+                ("MP4 files", "*.mp4"),
+                ("AVI files", "*.avi"),
+                ("All files", "*.*"),
+            ],
         )
         if not movie_path:
             return
@@ -1030,6 +1034,18 @@ class DrumApp:
         y = self.canvas.winfo_rooty()
         w = self.canvas.winfo_width()
         h = self.canvas.winfo_height()
+
+        # ★ wmv2 が要求するので、幅・高さを必ず偶数にそろえる
+        if w % 2 == 1:
+            w -= 1
+        if h % 2 == 1:
+            h -= 1
+
+        # もし極端に小さい場合はエラーにしておく（任意）
+        if w <= 0 or h <= 0:
+            messagebox.showerror("エラー", "キャンバスサイズが小さすぎます。ウインドウを大きくして再試行してください。")
+            return
+
         bbox = (x, y, x + w, y + h)
 
         # capture_frame: step_index -> Image
@@ -1052,6 +1068,9 @@ class DrumApp:
                 capture_frame=capture_frame,
                 movie_path=movie_path,
                 fps=30,
+                # Windows Media Player を意識したコーデック指定
+                video_codec="wmv2",   # WMV2 / ASF 系
+                audio_codec="aac",    # ダメなら "wmav2" に変更してテスト
             )
         except ImportError as e:
             # moviepy / numpy が無い場合など
