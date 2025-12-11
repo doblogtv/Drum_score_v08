@@ -3,7 +3,7 @@ from typing import List, Tuple, Optional
 
 
 # ==========================================================
-# Drum Score Player v0.7.2
+# Drum Score Player v0.8.0
 # テキスト譜面ルール ＋ CHECK ブロック検証
 # ==========================================================
 
@@ -77,28 +77,27 @@ class Score:
     @classmethod
     def from_text(cls, text: str) -> "Score":
         """
-        v0.7.2 テキストフォーマット:
+        v0.8.0 テキストフォーマット:
 
           FILENAME=◯◯◯       ← Score では使わない（GUI側で利用）
           TITLE=◯◯◯          ← 任意
-          TEMPO=80
+          TEMPO=80           ← 任意（省略時は 120 とみなす）
           TIME=4/4
           PULSES_PER_BEAT=4
 
-          HH: x1 x1 x1 x1 ...
-          SD: -4 x4 -4 x4 ...
-          BD: ...
+          HH: x x x x ... 16 トークンで 1 小節固定（不足は "."）
+          HH: x x x x ... ← 2 小節目。行頭のトラック名は毎行必須。
+          SD: - - - - ...
 
         - トークン:
-            音符: xN, oN, XN, ON
-            休符: -N, rN, RN, _N
-            N はステップ数（正の整数）
+            音符: x, o, X, O
+            休符: -, r, R, _, .   （"." は 1 ステップのパディング）
+            長さを表す数字や "|" は禁止。1 トークン = 1 ステップとする。
 
         - 強弱:
             トークン末尾に ^pp, ^p, ^mp, ^mf, ^f, ^ff
-            例: x1^f, o2^pp, -4^p
-
-        - "|" は小節区切りマーカーとして許可されるが、ステップには数えない。
+            例: x^f, o^pp, -^p
+            "." には強弱を付けられない。
 
         - ファイル末尾などに置く検算ブロック:
 
@@ -106,11 +105,10 @@ class Score:
               Track01_Total = 64
               Track02_Total = 64
               Track03_Total = 64
-              Bars_Total    = 4
-              Steps_Per_Bar = 16
             %%ENDCHECK
 
-          は必須。記載された数値と解析結果が一致しない場合はエラーを返す。
+          は必須。派生値（Bars_Total / Steps_Per_Bar など）は書かない。
+          記載された数値と解析結果が一致しない場合はエラーを返す。
         """
         print("[INFO] Score.from_text: parsing text score...")
 
@@ -121,115 +119,48 @@ class Score:
         title: Optional[str] = None
 
         lines = text.splitlines()
-        current_track_name: Optional[str] = None
-        current_track_tokens: List[str] = []
+
+        # 行ごとのトラック情報を保持（1 行 = 1 小節固定）
+        track_token_map: dict[str, List[Tuple[str, str]]] = {}
 
         # CHECK ブロックの解析
         in_check_block = False
-        check_values = {}
+        check_values: dict[str, int] = {}
         check_block_found = False
 
-        # トラックごとの合計ステップ数を記録して、CHECK と突き合わせる
-        track_total_steps = {}
+        def parse_token(token_raw: str) -> Tuple[str, str]:
+            """
+            固定長 1 ステップのトークンのみを受け付ける。
+            数字や "|"、空トークンはすべて拒否する。
+            """
 
-        # ----------------------------
-        # トラックを確定
-        # ----------------------------
-        def flush_current_track():
-            nonlocal current_track_name, current_track_tokens, tracks
-
-            if current_track_name is None:
-                return
-
-            if time_sig is None or pulses_per_beat is None:
-                raise ValueError("TIME または PULSES_PER_BEAT が不足しています。")
-
-            bar_steps = time_sig[0] * pulses_per_beat
-            tokens = current_track_tokens
-            events: List[NoteEvent] = []
-            current_step = 0
-
-            for token_raw in tokens:
-                token = token_raw.strip()
-                if not token:
-                    continue
-
-                # 小節区切りは完全無視
-                if token == "|":
-                    continue
-
-                # 強弱
-                dynamic = "mf"
-                if "^" in token:
-                    base, dyn = token.split("^", 1)
-                    token = base.strip()
-                    dyn = dyn.strip()
-                    if dyn not in ("pp", "p", "mp", "mf", "f", "ff"):
-                        raise ValueError(f"未知の強弱記号 '{dyn}' in '{token_raw}'")
-                    dynamic = dyn
-
-                if not token:
-                    continue
-
-                kind = token[0]
-                length_str = token[1:]
-                if not length_str.isdigit():
-                    raise ValueError(f"トークン '{token_raw}' の長さが整数ではありません。")
-
-                length = int(length_str)
-                if length <= 0:
-                    raise ValueError(f"トークン '{token_raw}' の長さが正の整数ではありません。")
-
-                if kind in ("x", "X", "o", "O"):
-                    symbol = kind
-                elif kind in ("-", "r", "R", "_"):
-                    symbol = "rest"
-                else:
-                    raise ValueError(f"未知のトークン種 '{kind}' in '{token_raw}'")
-
-                events.append(
-                    NoteEvent(
-                        start_step=current_step,
-                        length_steps=length,
-                        symbol=symbol,
-                        dynamic=dynamic,
-                    )
-                )
-
-                current_step += length
-
-            # 小節チェック
-            if bar_steps <= 0:
-                raise ValueError("1小節あたりのステップ数(bar_steps) が 0 以下です。")
-
-            if current_step % bar_steps != 0:
-                full_bars = current_step // bar_steps
-                remainder = current_step % bar_steps
-                raise ValueError(
-                    f"トラック {current_track_name}: 合計 {current_step} ステップは "
-                    f"1小節 {bar_steps} の整数倍ではありません。"
-                    f" → {full_bars}小節分 + 余り {remainder}"
-                )
-
-            # CHECK ブロック用に合計を記録
-            track_total_steps[current_track_name] = current_step
-
-            if current_step == 0:
-                print(f"[WARN] トラック {current_track_name}: イベントがありません（空トラック）。")
+            if "^" in token_raw:
+                base, dyn = token_raw.split("^", 1)
+                base = base.strip()
+                dyn = dyn.strip()
+                if dyn not in ("pp", "p", "mp", "mf", "f", "ff"):
+                    raise ValueError(f"未知の強弱記号 '{dyn}' in '{token_raw}'")
+                if base == ".":
+                    raise ValueError("'.' に強弱は付けられません。")
             else:
-                bars = current_step // bar_steps
-                if bars > 1:
-                    print(
-                        f"[INFO] トラック {current_track_name}: "
-                        f"{current_step} ステップ = {bars} 小節分として解釈します。"
-                    )
+                base = token_raw.strip()
+                dyn = "mf"
 
-            # 開始ステップでソートして追加
-            events.sort(key=lambda e: e.start_step)
-            tracks.append(Track(current_track_name, events))
+            if not base:
+                raise ValueError("空のトークンは無効です。")
 
-            current_track_name = None
-            current_track_tokens = []
+            if base == "|":
+                raise ValueError("'|' は小節区切りとしても使用できません。固定長のみ許可します。")
+
+            if any(ch.isdigit() for ch in base):
+                raise ValueError(f"固定長フォーマットでは数字を含むトークンは使用できません: '{token_raw}'")
+
+            allowed = {"x", "X", "o", "O", "-", "r", "R", "_", "."}
+            if base not in allowed:
+                raise ValueError(f"未知のトークン '{token_raw}'")
+
+            symbol = "rest" if base in {"-", "r", "R", "_", "."} else base
+            return symbol, dyn
 
         # ================================
         # 行解析
@@ -288,31 +219,96 @@ class Score:
 
             # トラック行
             if ":" in line:
-                # 既存トラックを確定
-                flush_current_track()
+                if time_sig is None or pulses_per_beat is None:
+                    raise ValueError("TIME と PULSES_PER_BEAT をトラックより前に記述してください。")
+
                 name, data = line.split(":", 1)
-                current_track_name = name.strip()
-                current_track_tokens = data.strip().split()
+                track_name = name.strip()
+                if not track_name:
+                    raise ValueError("トラック名が空です。")
+
+                tokens = data.strip().split()
+                bar_steps = time_sig[0] * pulses_per_beat
+                if bar_steps <= 0:
+                    raise ValueError("1小節あたりのステップ数(bar_steps) が 0 以下です。")
+
+                if len(tokens) != bar_steps:
+                    raise ValueError(
+                        f"トラック {track_name}: 1 行のトークン数 {len(tokens)} が "
+                        f"1小節 {bar_steps} と一致しません。'.' でパディングしてください。"
+                    )
+
+                parsed_tokens: List[Tuple[str, str]] = []
+                for token_raw in tokens:
+                    parsed_tokens.append(parse_token(token_raw))
+
+                track_token_map.setdefault(track_name, []).extend(parsed_tokens)
                 continue
 
-            # トラック継続行
-            if current_track_name is not None:
-                current_track_tokens.extend(line.split())
-                continue
+            # それ以外は旧形式の継続行などとみなし、明示的に拒否
+            raise ValueError(f"行の形式を解釈できません: '{line}'")
 
-            # それ以外の行は無視
-            continue
+        if time_sig is None or pulses_per_beat is None:
+            raise ValueError("TIME と PULSES_PER_BEAT は必須です。")
 
-        # 最後のトラックをフラッシュ
-        flush_current_track()
-
-        if tempo is None or time_sig is None or pulses_per_beat is None:
-            raise ValueError("TEMPO, TIME, PULSES_PER_BEAT のいずれかが不足しています。")
+        if tempo is None:
+            tempo = 120
 
         if not check_block_found:
             raise ValueError(
                 "CHECK ブロックが見つかりません。譜面末尾に検算用のブロックを追加してください。"
             )
+
+        if not track_token_map:
+            raise ValueError("トラック定義が見つかりません。")
+
+        bar_steps = time_sig[0] * pulses_per_beat
+        if bar_steps <= 0:
+            raise ValueError("1小節あたりのステップ数(bar_steps) が 0 以下です。")
+
+        track_total_steps: dict[str, int] = {}
+        for track_name, tokens in track_token_map.items():
+            total_steps = len(tokens)
+            track_total_steps[track_name] = total_steps
+
+            if total_steps % bar_steps != 0:
+                raise ValueError(
+                    f"トラック {track_name}: 合計 {total_steps} ステップは "
+                    f"1小節 {bar_steps} の整数倍ではありません。"
+                )
+
+            events: List[NoteEvent] = []
+            if tokens:
+                start_idx = 0
+                current_symbol, current_dyn = tokens[0]
+                length = 1
+                for idx, (symbol, dyn) in enumerate(tokens[1:], start=1):
+                    if symbol == current_symbol and dyn == current_dyn:
+                        length += 1
+                    else:
+                        events.append(
+                            NoteEvent(
+                                start_step=start_idx,
+                                length_steps=length,
+                                symbol=current_symbol,
+                                dynamic=current_dyn,
+                            )
+                        )
+                        start_idx = idx
+                        current_symbol = symbol
+                        current_dyn = dyn
+                        length = 1
+
+                events.append(
+                    NoteEvent(
+                        start_step=start_idx,
+                        length_steps=length,
+                        symbol=current_symbol,
+                        dynamic=current_dyn,
+                    )
+                )
+
+            tracks.append(Track(track_name, events))
 
         score = cls(
             tempo=tempo,
@@ -340,33 +336,10 @@ class Score:
                     f"{key}: CHECK={expected} と解析結果 {total} が一致しません。"
                 )
 
-        # 2. CHECK に存在するがトラックとして見つからない項目
-        unknown_track_keys = [
-            key
-            for key in check_values.keys()
-            if key.endswith("_Total")
-            and key not in track_total_keys
-            and key != "Bars_Total"
-        ]
-        for key in unknown_track_keys:
-            errors.append(f"CHECK ブロックの {key} は対応するトラックが見つかりません。")
-
-        # 3. Bars_Total / Steps_Per_Bar の整合性
-        if "Bars_Total" in check_values:
-            expected_bars = check_values["Bars_Total"]
-            actual_bars = score.bars
-            if expected_bars != actual_bars:
-                errors.append(
-                    f"Bars_Total: CHECK={expected_bars} と解析結果 {actual_bars} が一致しません。"
-                )
-
-        if "Steps_Per_Bar" in check_values:
-            expected_spb = check_values["Steps_Per_Bar"]
-            actual_spb = score.bar_steps
-            if expected_spb != actual_spb:
-                errors.append(
-                    f"Steps_Per_Bar: CHECK={expected_spb} と解析結果 {actual_spb} が一致しません。"
-                )
+        # 2. CHECK に存在するがトラックとして見つからない項目や派生値
+        extra_keys = [key for key in check_values.keys() if key not in track_total_keys]
+        for key in extra_keys:
+            errors.append(f"CHECK ブロックの {key} は許可されていません。トラック名_Total のみ記述してください。")
 
         if errors:
             error_text = "\n".join(errors)
@@ -386,8 +359,7 @@ class Score:
     def create_default_score(cls) -> "Score":
         """
         アプリ初回起動時などに使うデフォルト譜面。
-        4小節 = 64ステップになるように組んだ
-        「ちょっとだけプロっぽい」デモパターン。
+        固定長 1 ステップトークンのみを利用した 4 小節（64 ステップ）。
         """
         text = """FILENAME=DefaultGroove_Showcase.txt
 TITLE=Default Groove Showcase
@@ -400,27 +372,25 @@ PULSES_PER_BEAT=4
 # Bar3: SDのロール気味フィル
 # Bar4: BDのフィルで締め
 
-HH: x1 x1 x1 x1  x1 x1 x1 x1  x1 x1 x1 x1  x1 x1 x1 x1
-    x1^f x1^p x1^p x1^p  x1^f x1^p x1^p x1^p  x1^f x1^p x1^p x1^p  x1^f x1^p x1^p x1^p
-    x2 x2 x2 x2  x2 x2 x2 x2
-    x4 x4 x4 x4
+HH: x x x x x x x x x x x x x x x x
+HH: x^f x x x x^f x x x x^f x x x x^f x x x
+HH: x x x x x x x x x x x x x x x x
+HH: o o x x o o x x o o x x o o x x
 
-SD: -4 x1 -3  -4 x1 -3
-    -1 x1^pp -2  -1 x1^mf -2  -1 x1^pp -2  -1 x1^f -2
-    x1^p x1^p x1^p x1^p  x2^mf x2^mf  x1^f x1^f x1^f x1^f  x2^ff x2^ff
-    -12 x1^f x1^f x1^ff x1^ff
+SD: . . . . . x . . . x . . . x . .
+SD: . . . . x . . . x . . . x . . .
+SD: . . x x x x x x . . x x x x x x
+SD: . . . . x x x x . . x x . . x x
 
-BD: x1 -3 x1 -3 x1 -3 x1 -3
-    x4 -4 x4 -4
-    -2 x1 -1 x1 -4 x1 -2 x1 -2 x1
-    x2 x2 x2 x2 -8
+BD: x . . . . . x . . . x . . . x .
+BD: x . . . x . . . x . . . x . . .
+BD: x . x . x . x . x . x . x . x .
+BD: x x . . x x . . x . . . x . . .
 
 %%CHECK:
-  HH_Total      = 64
-  SD_Total      = 64
-  BD_Total      = 64
-  Bars_Total    = 4
-  Steps_Per_Bar = 16
+  HH_Total = 64
+  SD_Total = 64
+  BD_Total = 64
 %%ENDCHECK
 """
         return cls.from_text(text)
