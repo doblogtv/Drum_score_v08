@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 
@@ -85,14 +86,17 @@ class Score:
           TIME=4/4
           PULSES_PER_BEAT=4
 
-          HH: x x x x ... 16 トークンで 1 小節固定（不足は "."）
-          HH: x x x x ... ← 2 小節目。行頭のトラック名は毎行必須。
-          SD: - - - - ...
+          HH: x+++ x+++ x+++ x+++    ← 4 分音符4つ（PPB=4の場合）
+          HH: 1+++++++++++++++       ← 全音符（音色省略で x 扱い）
+          SD: o2+++++++  -4---- ...  ← 2 分音符や 4 分休符の指定も可
 
         - トークン:
-            音符: x, o, X, O
-            休符: -, r, R, _, .   （"." は 1 ステップのパディング）
-            長さを表す数字や "|" は禁止。1 トークン = 1 ステップとする。
+            音符: x, o, X, O  （末尾に "+" を付ければ任意長に伸ばせる）
+            休符: -, r, R, _, . （同上。"." は不足分のパディングにも利用）
+            音価指定: 1,2,4,8,16,32,64 を使用し、必要に応じて音色プレフィックス
+                      を付与（例: o2+++++++ はオープンの 2 分音符）。
+            `+` はトークン末尾のみ許可。音価指定に期待長-1 個の `+` を添えると、
+            小節内の長さを視覚的に確認できる。
 
         - 強弱:
             トークン末尾に ^pp, ^p, ^mp, ^mf, ^f, ^ff
@@ -120,19 +124,17 @@ class Score:
 
         lines = text.splitlines()
 
-        # 行ごとのトラック情報を保持（1 行 = 1 小節固定）
-        track_token_map: dict[str, List[Tuple[str, str]]] = {}
+        # 行ごとのトラック情報を保持
+        track_events_map: dict[str, List[NoteEvent]] = {}
+        track_total_steps: dict[str, int] = {}
 
         # CHECK ブロックの解析
         in_check_block = False
         check_values: dict[str, int] = {}
         check_block_found = False
 
-        def parse_token(token_raw: str) -> Tuple[str, str]:
-            """
-            固定長 1 ステップのトークンのみを受け付ける。
-            数字や "|"、空トークンはすべて拒否する。
-            """
+        def split_dynamic(token_raw: str) -> Tuple[str, str]:
+            """トークンから強弱を切り出す。"""
 
             if "^" in token_raw:
                 base, dyn = token_raw.split("^", 1)
@@ -146,21 +148,85 @@ class Score:
                 base = token_raw.strip()
                 dyn = "mf"
 
-            if not base:
+            return base, dyn
+
+        duration_pattern = re.compile(r"^(?P<prefix>[xXoO\-rR_]?)?(?P<note_value>64|32|16|8|4|2|1)$")
+
+        def note_value_to_steps(note_value: int) -> int:
+            """拍子記号と PPB から音価をステップ数へ換算する。"""
+
+            numerator = pulses_per_beat * time_sig[1]
+            if note_value <= 0:
+                raise ValueError(f"音価 {note_value} は 0 以下です。")
+
+            if numerator % note_value != 0:
+                raise ValueError(
+                    f"TIME={time_sig[0]}/{time_sig[1]}, PPB={pulses_per_beat} では "
+                    f"音価 1/{note_value} を整数ステップに変換できません。PPB を見直してください。"
+                )
+
+            return numerator // note_value
+
+        def parse_token(token_raw: str) -> Tuple[str, str, int]:
+            """
+            拍指定を含む新フォーマットを解釈し、
+            (symbol, dyn, length_steps) を返す。
+
+            - `1,2,4,8,16,32,64` は音価指定。先頭/末尾に x,o などを付けて音色を明示できる。
+              例: `1+++++++++`（全音符）、`o2+++++++`（オープンの 2 分音符）。
+            - `+` はトークン末尾のみに置ける持続マーカー。音価指定トークンでは
+              「期待長-1」と同数の `+` を書くと視覚的に長さを確認できる。
+            - 従来の `x` や `-` など 1 ステップトークンも継続して使用可能で、
+              `x+++` のように `+` を付ければ任意ステップに伸ばせる。
+            """
+
+            token = token_raw.strip()
+            if not token:
                 raise ValueError("空のトークンは無効です。")
+
+            plus_count = len(token) - len(token.rstrip("+"))
+            core = token.rstrip("+")
+
+            base, dyn = split_dynamic(core)
+            if not base:
+                raise ValueError(f"'+' だけのトークンは使用できません: '{token_raw}'")
 
             if base == "|":
                 raise ValueError("'|' は小節区切りとしても使用できません。固定長のみ許可します。")
 
-            if any(ch.isdigit() for ch in base):
-                raise ValueError(f"固定長フォーマットでは数字を含むトークンは使用できません: '{token_raw}'")
+            if base == "." and dyn != "mf":
+                raise ValueError("'.' に強弱は付けられません。")
 
-            allowed = {"x", "X", "o", "O", "-", "r", "R", "_", "."}
-            if base not in allowed:
-                raise ValueError(f"未知のトークン '{token_raw}'")
+            m = duration_pattern.match(base)
 
-            symbol = "rest" if base in {"-", "r", "R", "_", "."} else base
-            return symbol, dyn
+            if m:
+                note_value = int(m.group("note_value"))
+                prefix = m.group("prefix") or ""
+
+                length_steps = note_value_to_steps(note_value)
+
+                if plus_count not in (0, length_steps - 1):
+                    raise ValueError(
+                        f"{token_raw}: '+' の数 {plus_count} が音価 1/{note_value} の長さ {length_steps} と一致しません。"
+                        f"（期待 {length_steps - 1} 個）"
+                    )
+
+                if prefix in {"-", "r", "R", "_"}:
+                    symbol = "rest"
+                elif prefix in {"x", "X", "o", "O"}:
+                    symbol = prefix
+                else:
+                    # 音色を省略した場合は標準の "x" を鳴らす
+                    symbol = "x"
+            else:
+                allowed = {"x", "X", "o", "O", "-", "r", "R", "_", "."}
+                if base not in allowed:
+                    raise ValueError(f"未知のトークン '{token_raw}'")
+
+                symbol = "rest" if base in {"-", "r", "R", "_", "."} else base
+                length_steps = 1 + plus_count
+
+            return symbol, dyn, length_steps
 
         # ================================
         # 行解析
@@ -232,17 +298,50 @@ class Score:
                 if bar_steps <= 0:
                     raise ValueError("1小節あたりのステップ数(bar_steps) が 0 以下です。")
 
-                if len(tokens) != bar_steps:
+                if track_name not in track_events_map:
+                    track_events_map[track_name] = []
+                    track_total_steps[track_name] = 0
+
+                line_events: List[Tuple[int, str, str, int]] = []
+                line_length = 0
+
+                for token_raw in tokens:
+                    symbol, dyn, length_steps = parse_token(token_raw)
+                    if length_steps <= 0:
+                        raise ValueError(f"トークン '{token_raw}' の長さが 0 以下です。")
+
+                    line_events.append((line_length, symbol, dyn, length_steps))
+                    line_length += length_steps
+
+                if line_length != bar_steps:
                     raise ValueError(
-                        f"トラック {track_name}: 1 行のトークン数 {len(tokens)} が "
-                        f"1小節 {bar_steps} と一致しません。'.' でパディングしてください。"
+                        f"トラック {track_name}: 1 行の長さ {line_length} ステップが "
+                        f"1小節 {bar_steps} ステップと一致しません。" "音価指定や '+' を見直してください。"
                     )
 
-                parsed_tokens: List[Tuple[str, str]] = []
-                for token_raw in tokens:
-                    parsed_tokens.append(parse_token(token_raw))
+                start_offset = track_total_steps[track_name]
+                events = track_events_map[track_name]
 
-                track_token_map.setdefault(track_name, []).extend(parsed_tokens)
+                for rel_start, symbol, dyn, length_steps in line_events:
+                    start_step = start_offset + rel_start
+                    if (
+                        symbol == "rest"
+                        and events
+                        and events[-1].symbol == "rest"
+                        and events[-1].start_step + events[-1].length_steps == start_step
+                    ):
+                        events[-1].length_steps += length_steps
+                    else:
+                        events.append(
+                            NoteEvent(
+                                start_step=start_step,
+                                length_steps=length_steps,
+                                symbol=symbol,
+                                dynamic=dyn,
+                            )
+                        )
+
+                track_total_steps[track_name] += line_length
                 continue
 
             # それ以外は旧形式の継続行などとみなし、明示的に拒否
@@ -259,94 +358,21 @@ class Score:
                 "CHECK ブロックが見つかりません。譜面末尾に検算用のブロックを追加してください。"
             )
 
-        if not track_token_map:
+        if not track_events_map:
             raise ValueError("トラック定義が見つかりません。")
 
         bar_steps = time_sig[0] * pulses_per_beat
         if bar_steps <= 0:
             raise ValueError("1小節あたりのステップ数(bar_steps) が 0 以下です。")
 
-        track_total_steps: dict[str, int] = {}
-        for track_name, tokens in track_token_map.items():
-            total_steps = len(tokens)
-            track_total_steps[track_name] = total_steps
+        for track_name, events in track_events_map.items():
+            total_steps = track_total_steps[track_name]
 
             if total_steps % bar_steps != 0:
                 raise ValueError(
                     f"トラック {track_name}: 合計 {total_steps} ステップは "
                     f"1小節 {bar_steps} の整数倍ではありません。"
                 )
-
-            events: List[NoteEvent] = []
-            idx = 0
-
-            while idx < len(tokens):
-                symbol, dyn = tokens[idx]
-
-                if symbol != "rest":
-                    # 叩く音符は常に 1 ステップ固定でトリガーする
-                    events.append(
-                        NoteEvent(
-                            start_step=idx,
-                            length_steps=1,
-                            symbol=symbol,
-                            dynamic=dyn,
-                        )
-                    )
-                    idx += 1
-                    continue
-
-                # 休符は「できるだけまとめる」方針だが、1 拍を越えた連結は
-                # 4 分休符が 2 拍続く場合（= 2 分休符相当）や 1 小節丸ごと
-                # 休符になる場合（全休符）に限り許容する。
-                # これは譜例の慣習に合わせ、拍頭で隣り合う休符同士は
-                # まとめて表記するのが望ましいため。
-                total_rest_run = 0
-                while idx + total_rest_run < len(tokens):
-                    next_symbol, _ = tokens[idx + total_rest_run]
-                    if next_symbol != "rest":
-                        break
-                    total_rest_run += 1
-
-                rest_remaining = total_rest_run
-                while rest_remaining > 0:
-                    beat_pos = idx % pulses_per_beat
-                    beat_remaining = pulses_per_beat - beat_pos
-                    bar_pos = idx % bar_steps
-                    bar_remaining = bar_steps - bar_pos
-
-                    if beat_pos == 0:
-                        full_beats_in_bar = bar_remaining // pulses_per_beat
-                        available_full_beats = min(
-                            rest_remaining // pulses_per_beat, full_beats_in_bar
-                        )
-
-                        if available_full_beats >= time_sig[0]:
-                            # 全休符（拍数にかかわらず小節全体を 1 つに）
-                            chunk_beats = time_sig[0]
-                        elif available_full_beats >= 2:
-                            # 隣り合う 2 拍の 4 分休符は 2 分休符相当としてまとめる
-                            chunk_beats = 2
-                        else:
-                            chunk_beats = 1
-
-                        chunk_steps = min(
-                            chunk_beats * pulses_per_beat, rest_remaining, bar_remaining
-                        )
-                    else:
-                        # 拍をまたがないよう、残りの拍分だけまとめる
-                        chunk_steps = min(rest_remaining, beat_remaining)
-
-                    events.append(
-                        NoteEvent(
-                            start_step=idx,
-                            length_steps=chunk_steps,
-                            symbol="rest",
-                            dynamic=dyn,
-                        )
-                    )
-                    idx += chunk_steps
-                    rest_remaining -= chunk_steps
 
             tracks.append(Track(track_name, events))
 
