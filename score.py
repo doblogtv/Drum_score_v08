@@ -344,7 +344,9 @@ class Score:
         unknown_track_keys = [
             key
             for key in check_values.keys()
-            if key.endswith("_Total") and key not in track_total_keys
+            if key.endswith("_Total")
+            and key not in track_total_keys
+            and key != "Bars_Total"
         ]
         for key in unknown_track_keys:
             errors.append(f"CHECK ブロックの {key} は対応するトラックが見つかりません。")
@@ -414,9 +416,9 @@ BD: x1 -3 x1 -3 x1 -3 x1 -3
     x2 x2 x2 x2 -8
 
 %%CHECK:
-  Track01_Total = 64
-  Track02_Total = 64
-  Track03_Total = 64
+  HH_Total      = 64
+  SD_Total      = 64
+  BD_Total      = 64
   Bars_Total    = 4
   Steps_Per_Bar = 16
 %%ENDCHECK
