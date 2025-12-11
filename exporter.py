@@ -1,6 +1,7 @@
+# exporter.py
 import wave
 import struct
-from typing import Dict, Tuple, List, Callable
+from typing import Callable, List
 import tempfile
 import os
 
@@ -22,39 +23,6 @@ def dynamic_to_level(dyn: str) -> int:
     return 2
 
 
-def _load_combo_waves(synth: DrumSynth) -> Dict[Tuple[int, int, int], List[float]]:
-    """
-    DrumSynth が生成した combo WAV を読み込んで
-    key -> [-1.0..1.0] の float 配列にして返す
-    """
-    combo_waves: Dict[Tuple[int, int, int], List[float]] = {}
-
-    for key, path in synth.combo_files.items():
-        if path is None:
-            combo_waves[key] = []
-            continue
-
-        with wave.open(path, "rb") as wf:
-            n_channels = wf.getnchannels()
-            sr = wf.getframerate()
-            n_frames = wf.getnframes()
-            sampwidth = wf.getsampwidth()
-
-            if n_channels != 1:
-                raise ValueError("combo WAV はモノラルを想定しています。")
-            if sr != synth.sr:
-                raise ValueError("combo WAV のサンプリングレートが DrumSynth.sr と一致しません。")
-            if sampwidth != 2:
-                raise ValueError("combo WAV は16bit PCMを想定しています。")
-
-            raw = wf.readframes(n_frames)
-            ints = struct.unpack("<{}h".format(n_frames), raw)
-            floats = [v / 32768.0 for v in ints]
-            combo_waves[key] = floats
-
-    return combo_waves
-
-
 def render_score_to_wav(
     score: Score,
     synth: DrumSynth,
@@ -64,31 +32,43 @@ def render_score_to_wav(
     """
     Score と DrumSynth からオフラインで WAV を合成して保存する。
 
-    - ループ回数 loop_count 分だけシーケンスを連結
-    - return: 実際に書き出したおおよその再生時間（秒）
-      （動画側で目安として使える）
-
-    タイミング仕様は GUI 再生と合わせる：
-      step_duration_sec = 60 / (tempo * pulses_per_beat)
+    - GUI 再生と同じタイミングで、ステップごとに
+      HH / SD / BD の波形をミックスする
+    - loop_count 回だけ譜面を連結
+    - return: 書き出した再生時間の目安（秒）
     """
     if loop_count <= 0:
         loop_count = 1
 
-    sr = synth.sr
     pulses = score.pulses_per_beat
     tempo = score.tempo
     total_steps_one_loop = score.total_steps
-
     if pulses <= 0 or tempo <= 0 or total_steps_one_loop <= 0:
         raise ValueError("Score のヘッダー情報が不正です。")
 
-    step_duration_sec = 60.0 / (tempo * pulses)
+    # DrumSynth のサンプルレート
+    sr = getattr(synth, "sample_rate", 44100)
 
+    step_duration_sec = 60.0 / (tempo * pulses)
     total_steps_all = total_steps_one_loop * loop_count
     total_duration_sec = total_steps_all * step_duration_sec
 
-    # 最終のヒット分を少し余裕を持って確保
-    total_samples = int(total_duration_sec * sr) + synth.hit_samples + 2
+    # 各トラック用の波形（WAV があれば優先、無ければ内蔵シンセ）
+    dyn_gain_map = synth.sound_settings.get(
+        "dyn_gain",
+        {0: 0.0, 1: 0.4, 2: 0.8, 3: 1.1},
+    )
+
+    hh_wave = getattr(synth, "wav_hh", None) or getattr(synth, "internal_hh", None)
+    sd_wave = getattr(synth, "wav_sd", None) or getattr(synth, "internal_sd", None)
+    bd_wave = getattr(synth, "wav_bd", None) or getattr(synth, "internal_bd", None)
+
+    available_waves = [w for w in (hh_wave, sd_wave, bd_wave) if w is not None]
+    if not available_waves:
+        raise ValueError("DrumSynth に有効な波形がありません。")
+
+    hit_len_max = max(len(w) for w in available_waves)
+    total_samples = int(total_duration_sec * sr) + hit_len_max + 2
 
     print(
         f"[INFO] WAV export: tempo={tempo}, pulses={pulses}, "
@@ -96,58 +76,49 @@ def render_score_to_wav(
         f"duration≈{total_duration_sec:.2f} sec"
     )
 
-    # コンボ波形を読み込む
-    combo_waves = _load_combo_waves(synth)
-
-    # 1ループぶんの「各ステップの (hh, sd, bd) レベル」を前計算
-    step_levels: List[Tuple[int, int, int]] = []
-    for step in range(total_steps_one_loop):
-        hh_level = 0
-        sd_level = 0
-        bd_level = 0
-
-        # HH, SD, BD の3トラック想定
-        for i, track in enumerate(score.tracks[:3]):
-            level = 0
-            for ev in track.events:
-                if ev.symbol == "rest":
-                    continue
-                if ev.start_step == step:
-                    level = dynamic_to_level(ev.dynamic)
-                    break
-
-            if i == 0:
-                hh_level = level
-            elif i == 1:
-                sd_level = level
-            elif i == 2:
-                bd_level = level
-
-        step_levels.append((hh_level, sd_level, bd_level))
-
-    # ミックスバッファ
+    # ミックス用バッファ
     mix = [0.0] * total_samples
 
-    # ループごとに足し込み
+    # ループごとにミックス
     for loop_idx in range(loop_count):
         base_step_index = loop_idx * total_steps_one_loop
-        for local_step, combo_key in enumerate(step_levels):
-            hh_level, sd_level, bd_level = combo_key
-            if hh_level == 0 and sd_level == 0 and bd_level == 0:
-                continue
-
-            wave_data = combo_waves.get(combo_key)
-            if not wave_data:
-                continue
-
-            global_step = base_step_index + local_step
+        for step in range(total_steps_one_loop):
+            global_step = base_step_index + step
             start_sample = int(global_step * step_duration_sec * sr)
 
-            for n, v in enumerate(wave_data):
-                idx = start_sample + n
-                if idx >= total_samples:
-                    break
-                mix[idx] += v
+            # HH, SD, BD の 3 トラックのみ対象
+            for i, track in enumerate(score.tracks[:3]):
+                level = 0
+                for ev in track.events:
+                    if ev.symbol == "rest":
+                        continue
+                    if ev.start_step == step:
+                        level = dynamic_to_level(ev.dynamic)
+                        break
+
+                if level <= 0:
+                    continue
+
+                if i == 0:
+                    base_gain = synth.sound_settings.get("base_gain_hh", 0.4)
+                    wave_data = hh_wave
+                elif i == 1:
+                    base_gain = synth.sound_settings.get("base_gain_sd", 0.3)
+                    wave_data = sd_wave
+                else:
+                    base_gain = synth.sound_settings.get("base_gain_bd", 0.8)
+                    wave_data = bd_wave
+
+                if wave_data is None:
+                    continue
+
+                gain = base_gain * dyn_gain_map.get(level, 1.0)
+
+                for n, v in enumerate(wave_data):
+                    idx = start_sample + n
+                    if idx >= total_samples:
+                        break
+                    mix[idx] += v * gain
 
     # 正規化
     max_amp = max(abs(v) for v in mix) if mix else 0.0
@@ -178,36 +149,16 @@ def render_score_to_movie(
     capture_frame: Callable[[int], "object"],  # step_index -> PIL.Image.Image 相当
     movie_path: str,
     fps: int = 30,
-    video_codec: str | None = None,   # ← None なら拡張子から自動決定
-    audio_codec: str | None = None,
+    video_codec: str = "mpeg4",
+    audio_codec: str = "aac",
 ) -> None:
     """
-    - score / synth / loop_count からオフラインで音声WAVを作る
-    - capture_frame(step_index) を呼びながらフレーム列を集める
+    - render_score_to_wav() で一時 WAV を作成
+    - capture_frame(step_index) で譜面キャンバスをフレーム化
     - moviepy で音声と合成して動画を書き出す
-
-    拡張子でおおよそこう決める：
-      *.wmv → video: wmv2,  audio: wmav2  （WMP互換重視）
-      *.avi → video: mpeg4, audio: libmp3lame
-      その他（*.mp4 等）→ video: libx264, audio: aac
     """
     from moviepy import ImageSequenceClip, AudioFileClip
     import numpy as np
-    import tempfile
-    import os
-
-    # ---- ここで拡張子からコーデック自動決定 ----
-    lower = movie_path.lower()
-    if video_codec is None or audio_codec is None:
-        if lower.endswith(".wmv"):
-            video_codec = video_codec or "wmv2"
-            audio_codec = audio_codec or "wmav2"
-        elif lower.endswith(".avi"):
-            video_codec = video_codec or "mpeg4"
-            audio_codec = audio_codec or "libmp3lame"
-        else:  # デフォルトは MP4/H.264 + AAC 想定
-            video_codec = video_codec or "libx264"
-            audio_codec = audio_codec or "aac"
 
     if loop_count <= 0:
         loop_count = 1
@@ -225,7 +176,7 @@ def render_score_to_movie(
     total_steps_all = total_steps_one_loop * loop_count
     total_duration_sec = total_steps_all * step_duration_sec
 
-    # 一時WAV作成
+    # 一時 WAV
     tmp_fd, tmp_wav_path = tempfile.mkstemp(suffix=".wav")
     os.close(tmp_fd)
 
@@ -243,10 +194,6 @@ def render_score_to_movie(
         print(
             f"[INFO] Movie: duration≈{effective_duration:.2f} sec, "
             f"fps={fps}, frames={frame_count}"
-        )
-        print(
-            f"[INFO] Movie: codec={video_codec}, audio_codec={audio_codec}, "
-            f"path={movie_path}"
         )
 
         frames: List["np.ndarray"] = []
@@ -283,4 +230,3 @@ def render_score_to_movie(
             pass
 
     print(f"[INFO] Movie: saved to {movie_path}")
-

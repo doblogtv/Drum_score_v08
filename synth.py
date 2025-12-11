@@ -1,227 +1,207 @@
-import winsound
+import numpy as np
+import simpleaudio as sa
 import wave
-import struct
-import math
-import random
-import tempfile
 import os
-from typing import Dict, Tuple, Optional, List
 
 
 class DrumSynth:
     """
-    HH / SD / BD の簡易ドラム音源を合成して、
-    3トラックの組み合わせごとに WAV を事前生成しておくクラス。
-
-    強弱レベル：
-      各トラックについて level ∈ {0,1,2,3}
-        0 = 鳴らさない
-        1 = 弱（pp/p）
-        2 = 中（mp/mf）
-        3 = 強（f/ff）
-
-    combo_files のキー:
-        (hh_level, sd_level, bd_level)
+    ● WAV 読み込み対応
+    ● polyphonic（重ね鳴り）対応
+    ● 休符では発音停止しない
+    ● 次の同じ音が来ても上書きしない
     """
 
-    def __init__(self, sr: int = 44100, hit_ms: int = 260, sound_settings: Optional[dict] = None):
-        self.sr = sr
-        self.hit_ms = hit_ms
-        self.hit_samples = int(sr * hit_ms / 1000.0)
+    def __init__(self, sound_settings=None):
+        self.sound_settings = sound_settings or {
+            "base_gain_hh": 0.4,
+            "base_gain_sd": 0.3,
+            "base_gain_bd": 0.8,
+            "dyn_gain": {0: 0.0, 1: 0.4, 2: 0.8, 3: 1.1},
+        }
 
-        # サウンド設定（外部から変更可能）
-        if sound_settings is None:
-            sound_settings = {}
-        self.base_gain_hh = sound_settings.get("base_gain_hh", 0.4)
-        self.base_gain_sd = sound_settings.get("base_gain_sd", 0.3)
-        self.base_gain_bd = sound_settings.get("base_gain_bd", 0.8)
+        # サンプルレート（WAV も基本この SR を想定）
+        self.sample_rate = 44100
 
-        # 強弱倍率
-        self.dyn_gain: Dict[int, float] = sound_settings.get("dyn_gain", {
-            0: 0.0,
-            1: 0.4,
-            2: 0.8,
-            3: 1.1,
-        })
-        # dyn_gain に 0〜3 が必ずあるように補完
-        for k, v in {0: 0.0, 1: 0.4, 2: 0.8, 3: 1.1}.items():
-            self.dyn_gain.setdefault(k, v)
+        # 各楽器の WAV サンプル（外部読み込み用）
+        self.wav_hh = None
+        self.wav_sd = None
+        self.wav_bd = None
 
-        print("[INFO] DrumSynth: building combo waveforms...")
+        # simpleaudio で polyphonic 再生するためのハンドル
+        self.active_voices = []  # ← 再生中オブジェクトを保持（上書きしない）
 
-        # 各ドラムの生波形（-1.0〜1.0）
-        self.hh = self._make_hihat()
-        self.sd = self._make_snare()
-        self.bd = self._make_kick()
+        # 内蔵合成（WAV が無い時のバックアップ音源）
+        self._build_internal_synth()
 
-        self.combo_files: Dict[Tuple[int, int, int], Optional[str]] = {}
-        self._build_combos()
-
-        print("[INFO] DrumSynth: combo waveforms ready.")
-
-    # ------- パラメータ更新 -------
-    def update_params(self, sound_settings: dict):
-        """サウンド設定を更新し、コンボWAVを再生成"""
-        self.base_gain_hh = sound_settings.get("base_gain_hh", self.base_gain_hh)
-        self.base_gain_sd = sound_settings.get("base_gain_sd", self.base_gain_sd)
-        self.base_gain_bd = sound_settings.get("base_gain_bd", self.base_gain_bd)
-        dyn_gain = sound_settings.get("dyn_gain")
-        if dyn_gain:
-            self.dyn_gain.update(dyn_gain)
-
-        # 既存WAV削除
-        for path in self.combo_files.values():
-            if path and os.path.exists(path):
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
-        self.combo_files.clear()
-        print("[INFO] DrumSynth: rebuilding combo waveforms with new settings...")
-        self._build_combos()
-        print("[INFO] DrumSynth: combo waveforms updated.")
-
-    # ------- 基本的なエンベロープ --------
-    def _adsr_env(self, length: int, attack: float, decay: float) -> List[float]:
-        env = [0.0] * length
-        attack_samples = max(1, int(self.sr * attack))
-        decay_samples = max(1, int(self.sr * decay))
-        total = attack_samples + decay_samples
-        if total > length:
-            total = length
-            decay_samples = total - attack_samples
-
-        for i in range(attack_samples):
-            env[i] = i / attack_samples
-
-        for i in range(decay_samples):
-            idx = attack_samples + i
-            if idx >= length:
-                break
-            env[idx] = max(0.0, 1.0 - i / decay_samples)
-
-        return env
-
-    # ------- 各ドラムの合成 --------
-    def _make_kick(self) -> List[float]:
+    # -----------------------------------------------------------
+    # WAV 読み込み
+    # -----------------------------------------------------------
+    def load_wav(self, path: str, target: str):
         """
-        ソフトなクリック付きキック。
-        ・120Hz → 60Hz のピッチダウン
-        ・ごく短い 1kHz クリックを弱めに足す
+        target : "HH", "SD", "BD"
         """
-        length = self.hit_samples
-        env = self._adsr_env(length, attack=0.005, decay=0.25)
-
-        data = []
-        start_freq = 120.0
-        end_freq = 60.0
-
-        click_duration = int(self.sr * 0.004)
-        click_freq = 1200.0
-
-        for n in range(length):
-            t = n / self.sr
-
-            f = start_freq + (end_freq - start_freq) * (n / length)
-            phase = 2.0 * math.pi * f * t
-
-            base = math.sin(phase)
-            base += 0.3 * math.sin(3.0 * phase)
-
-            if n < click_duration:
-                click_env = 1.0 - (n / click_duration)
-                click = math.sin(2.0 * math.pi * click_freq * t) * click_env
-            else:
-                click = 0.0
-
-            s = (base * 0.95 + click * 0.15) * env[n]
-            data.append(s)
-
-        return data
-
-    def _make_snare(self) -> List[float]:
-        """ノイズ＋中域トーンのスネア"""
-        length = self.hit_samples
-        env = self._adsr_env(length, attack=0.001, decay=0.18)
-        data = []
-        tone_freq = 180.0
-        for n in range(length):
-            t = n / self.sr
-            noise = (random.random() * 2.0 - 1.0) * 0.7
-            tone = math.sin(2.0 * math.pi * tone_freq * t) * 0.3
-            s = (noise + tone) * env[n]
-            data.append(s)
-        return data
-
-    def _make_hihat(self) -> List[float]:
-        """高域ノイズのハイハット"""
-        length = self.hit_samples
-        env = self._adsr_env(length, attack=0.0005, decay=0.10)
-        data = []
-        for n in range(length):
-            noise = (random.random() * 2.0 - 1.0)
-            s = noise * env[n]
-            data.append(s * 0.05)
-        return data
-
-    # ------- コンボWAV生成（強弱対応版） --------
-    def _build_combos(self):
-        """
-        各トラックの level ∈ {0,1,2,3} に対して、
-        (hh_level, sd_level, bd_level) ごとに 1つの WAV を生成。
-        (0,0,0) は何も鳴らさないので None。
-        """
-        for hh_level in range(4):
-            for sd_level in range(4):
-                for bd_level in range(4):
-                    if hh_level == 0 and sd_level == 0 and bd_level == 0:
-                        self.combo_files[(hh_level, sd_level, bd_level)] = None
-                        continue
-
-                    mix = [0.0] * self.hit_samples
-
-                    if hh_level > 0:
-                        g = self.base_gain_hh * self.dyn_gain[hh_level]
-                        for i, v in enumerate(self.hh):
-                            mix[i] += v * g
-
-                    if sd_level > 0:
-                        g = self.base_gain_sd * self.dyn_gain[sd_level]
-                        for i, v in enumerate(self.sd):
-                            mix[i] += v * g
-
-                    if bd_level > 0:
-                        g = self.base_gain_bd * self.dyn_gain[bd_level]
-                        for i, v in enumerate(self.bd):
-                            mix[i] += v * g
-
-                    max_amp = max(abs(x) for x in mix) or 1.0
-                    if max_amp > 1.0:
-                        norm = 0.98 / max_amp
-                    else:
-                        norm = 0.98
-
-                    frames = []
-                    for x in mix:
-                        s = int(max(-32767, min(32767, x * norm * 32767)))
-                        frames.append(struct.pack("<h", s))
-                    pcm = b"".join(frames)
-
-                    fd, path = tempfile.mkstemp(suffix=".wav", prefix="drum_combo_dyn_")
-                    os.close(fd)
-                    wf = wave.open(path, "wb")
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)
-                    wf.setframerate(self.sr)
-                    wf.writeframes(pcm)
-                    wf.close()
-
-                    self.combo_files[(hh_level, sd_level, bd_level)] = path
-
-    def play_combo(self, hh_level: int, sd_level: int, bd_level: int):
-        """レベル三つに対応するコンボWAVを非同期再生"""
-        key = (hh_level, sd_level, bd_level)
-        path = self.combo_files.get(key)
-        if not path:
+        if not os.path.isfile(path):
+            print(f"[ERROR] WAV not found: {path}")
             return
-        winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+
+        with wave.open(path, "rb") as wf:
+            sr = wf.getframerate()
+            if sr != self.sample_rate:
+                print(
+                    f"[WARN] WAV {path} has different sample rate ({sr}), "
+                    f"expected {self.sample_rate}. ピッチを変えずのリサンプルは未実装です。"
+                )
+            frames = wf.readframes(wf.getnframes())
+            data = np.frombuffer(frames, dtype=np.int16).astype(np.float32)
+            data /= 32767.0  # 正規化（-1.0〜1.0）
+
+        if target.upper() == "HH":
+            self.wav_hh = data
+        elif target.upper() == "SD":
+            self.wav_sd = data
+        elif target.upper() == "BD":
+            self.wav_bd = data
+
+        print(f"[INFO] Loaded WAV for {target}: {path}")
+
+    # -----------------------------------------------------------
+    # 内蔵シンセ（WAV が無い場合の fallback）
+    # -----------------------------------------------------------
+    def _build_internal_synth(self):
+        """
+        内蔵音源を作る。
+        - HH / SD：0.2 秒ぐらいのノイズ＋エンベロープ
+        - BD：0.35〜0.4 秒の低音キック（ピッチダウン＋ADSR）
+        """
+
+        # ---- HH / SD 共通の時間軸（0.2 秒くらい）
+        t = np.linspace(0, 0.2, int(self.sample_rate * 0.2), endpoint=False)
+
+        # ハイハット（ノイズ＋速い減衰）
+        noise_hh = np.random.uniform(-1, 1, len(t))
+        env_hh = np.exp(-t * 60.0)  # かなり速く減衰
+        self.internal_hh = (noise_hh * env_hh * 0.5).astype(np.float32)
+
+        # スネア（ノイズ＋少しゆっくり目の減衰）
+        noise_sd = np.random.uniform(-1, 1, len(t))
+        env_sd = np.exp(-t * 35.0)
+        self.internal_sd = (noise_sd * env_sd * 0.6).astype(np.float32)
+
+        # ---- BD 用の時間軸（0.35〜0.4 秒）
+        bd_duration = 0.38  # 固定長（テンポ・音価に依存しない）
+        n_bd = int(self.sample_rate * bd_duration)
+        t_bd = np.linspace(0, bd_duration, n_bd, endpoint=False)
+
+        # キックの基音周波数（かなり低め）
+        f_start = 90.0   # 最初ちょっと高め
+        f_end = 50.0     # 少し低く下がる
+        # 線形に周波数を落としていく（軽いピッチダウン）
+        freq_env = np.linspace(f_start, f_end, n_bd)
+
+        # 周波数→位相積分
+        phase = 2.0 * np.pi * np.cumsum(freq_env) / self.sample_rate
+        tone = np.sin(phase)
+
+        # 簡易 ADSR エンベロープ
+        attack_time = 0.005   # 5 ms
+        decay_time = 0.15     # 150 ms
+        sustain_level = 0.35
+        release_time = bd_duration - (attack_time + decay_time)
+        if release_time < 0:
+            release_time = 0.05  # 万一マイナスなら最低 50ms は確保
+
+        attack_samps = int(self.sample_rate * attack_time)
+        decay_samps = int(self.sample_rate * decay_time)
+        release_samps = n_bd - attack_samps - decay_samps
+        if release_samps < 0:
+            release_samps = 0
+
+        env_bd = np.zeros(n_bd, dtype=np.float32)
+
+        # Attack
+        if attack_samps > 0:
+            env_bd[:attack_samps] = np.linspace(0.0, 1.0, attack_samps, endpoint=False)
+        # Decay
+        if decay_samps > 0:
+            env_bd[attack_samps:attack_samps + decay_samps] = np.linspace(
+                1.0, sustain_level, decay_samps, endpoint=False
+            )
+        # Release
+        if release_samps > 0:
+            env_bd[attack_samps + decay_samps:] = np.linspace(
+                sustain_level, 0.0, release_samps, endpoint=False
+            )
+
+        bd = tone * env_bd
+
+        # ちょっとだけクリップ防止のために余裕を持たせる
+        self.internal_bd = (bd * 0.9).astype(np.float32)
+
+    # -----------------------------------------------------------
+    # 1音鳴らす（polyphonic）
+    # -----------------------------------------------------------
+    def _play_sample(self, waveform: np.ndarray, volume: float):
+        """
+        simpleaudio を使って polyphonic に再生する
+        """
+        if waveform is None:
+            return
+
+        # 音量調整
+        w = waveform * volume
+        w = np.clip(w, -1.0, 1.0)
+        w16 = (w * 32767).astype(np.int16)
+
+        play_obj = sa.play_buffer(
+            w16,
+            num_channels=1,
+            bytes_per_sample=2,
+            sample_rate=self.sample_rate,
+        )
+
+        # 再生オブジェクトを保持 → 上書きせず、自然減衰に任せる
+        self.active_voices.append(play_obj)
+
+        # 終了したものを間引いてもいい（メモリ対策）※任意
+        alive = []
+        for obj in self.active_voices:
+            if obj.is_playing():
+                alive.append(obj)
+        self.active_voices = alive
+
+    # -----------------------------------------------------------
+    # 発音（毎ステップ呼び出される）
+    # -----------------------------------------------------------
+    def play_combo(self, hh_level, sd_level, bd_level):
+        """
+        ● 休符では発音を止めない
+        ● 各楽器は新しい音が来たらその都度 polyphonic で重ねる
+        """
+
+        dyn_gain = self.sound_settings["dyn_gain"]
+
+        # ハイハット
+        if hh_level > 0:
+            vol = self.sound_settings["base_gain_hh"] * dyn_gain.get(hh_level, 1.0)
+            if self.wav_hh is not None:
+                self._play_sample(self.wav_hh, vol)
+            else:
+                self._play_sample(self.internal_hh, vol)
+
+        # スネア
+        if sd_level > 0:
+            vol = self.sound_settings["base_gain_sd"] * dyn_gain.get(sd_level, 1.0)
+            if self.wav_sd is not None:
+                self._play_sample(self.wav_sd, vol)
+            else:
+                self._play_sample(self.internal_sd, vol)
+
+        # バスドラム
+        if bd_level > 0:
+            vol = self.sound_settings["base_gain_bd"] * dyn_gain.get(bd_level, 1.0)
+            if self.wav_bd is not None:
+                # 外部 WAV を使う場合も、長さはそのまま・ピッチもそのまま
+                self._play_sample(self.wav_bd, vol)
+            else:
+                self._play_sample(self.internal_bd, vol)

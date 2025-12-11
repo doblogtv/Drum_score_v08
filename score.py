@@ -3,74 +3,22 @@ from typing import List, Tuple, Optional
 
 
 # ==========================================================
-# Drum Score v0.7 テキスト譜面ルール（再掲）
-# ----------------------------------------------------------
-# ・1行目以降にメタ情報（順不同）
-#     FILENAME=◯◯◯   ← 任意（アプリ側で保存名などに使用）
-#     TITLE=◯◯◯      ← 任意（GUIに表示）
-#     TEMPO=80
-#     TIME=4/4
-#     PULSES_PER_BEAT=4
-#
-# ・トラック行
-#     HH: x1 x1 x1 x1 ...
-#     SD: -4 x1 -3 ...
-#     BD: ...
-#
-# ・記号
-#   - 音符: xN, oN, XN, ON
-#   - 休符: -N, rN, RN, _N
-#   - N は「ステップ数」（正の整数）
-#
-# ・強弱
-#   - 末尾に ^pp, ^p, ^mp, ^mf, ^f, ^ff を付ける
-#     例: x1^f, o2^pp, -4^p
-#   - 強弱を省略した場合は "mf"
-#
-# ・コメント
-#   - 行頭が "#" の行は丸ごとコメントとして無視
-#   - 行の途中に "#" があれば、それ以降はコメントとして無視
-#     例: HH: x1 x1  x1 x1  # ここから先はコメント扱い
-#
-# ・小節区切り
-#   - "|" は「見やすさのための小節区切りマーカー」
-#   - パーサは "|" トークンを完全に無視（ステップ長には影響しない）
-#
-# ・整合性チェック
-#   - 1小節のステップ数 = TIME.num * PULSES_PER_BEAT
-#     例: TIME=4/4, PULSES_PER_BEAT=4 → bar_steps = 16
-#   - 各トラックごとに
-#       合計ステップ数 % bar_steps == 0
-#     でなければエラーにする
-#     （"◯小節分 + 余り△ステップ" というメッセージ付き）
-#
-# ・Score 側の bar 情報
-#   - bar_steps: 1小節あたりのステップ数
-#   - bars: すべてのトラックの中で最も長いものの「小節数」
-#   - total_steps: bars * bar_steps
+# Drum Score Player v0.7.2
+# テキスト譜面ルール ＋ CHECK ブロック無視
 # ==========================================================
 
 
 @dataclass
 class NoteEvent:
-    """
-    1つの音符イベント（開始ステップと長さ）
-
-    symbol:
-      'x','o','X','O' → 音符
-      'rest'          → 休符
-    dynamic:
-      'pp','p','mp','mf','f','ff' など（デフォルト: 'mf'）
-    """
     start_step: int
     length_steps: int
-    symbol: str
-    dynamic: str = "mf"  # 強弱
+    symbol: str       # 'x','o','X','O','rest' など
+    dynamic: str = "mf"
 
 
 @dataclass
 class Track:
-    name: str              # 例: "HH", "SD", "BD"
+    name: str
     events: List[NoteEvent]
 
 
@@ -80,20 +28,17 @@ class Score:
     time_signature: Tuple[int, int]
     pulses_per_beat: int
     tracks: List[Track]
-    title: Optional[str] = None  # 譜面タイトル
+    title: Optional[str] = None
 
-    # ------------------------
-    # 基本プロパティ
-    # ------------------------
+    # ================================
+    # 小節関連
+    # ================================
     @property
     def beats_per_bar(self) -> int:
         return self.time_signature[0]
 
     @property
     def bar_steps(self) -> int:
-        """
-        1小節あたりのステップ数（例: 4/4, PULSES_PER_BEAT=4 → 16）
-        """
         return self.beats_per_bar * self.pulses_per_beat
 
     @property
@@ -111,52 +56,61 @@ class Score:
             if not track.events:
                 continue
             last = track.events[-1].start_step + track.events[-1].length_steps
-            if last > max_len:
-                max_len = last
+            max_len = max(max_len, last)
 
         if max_len <= 0:
             return 1
 
-        # 小数切り上げで「何小節ぶんあるか」を求める
+        # ceiling((max_len) / bar_steps)
         return max(1, (max_len + bar_steps - 1) // bar_steps)
 
     @property
     def total_steps(self) -> int:
         """
-        画面上での「全体の長さ」。
-        bars * bar_steps として、小節単位でそろえる。
+        画面上の全体長。bars * bar_steps で小節単位にそろえる。
         """
         return self.bars * self.bar_steps
 
-    # ---------- v3 フォーマット パーサ（小節整数倍チェック＋"|"無視） ----------
+    # ================================
+    # テキスト → Score パース
+    # ================================
     @classmethod
     def from_text(cls, text: str) -> "Score":
         """
-        フォーマット（v3）:
-          FILENAME=◯◯◯   ← 任意（Score では使わない）
-          TITLE=◯◯◯      ← 任意・あればGUIに表示
+        v0.7.2 テキストフォーマット:
+
+          FILENAME=◯◯◯       ← Score では使わない（GUI側で利用）
+          TITLE=◯◯◯          ← 任意
           TEMPO=80
           TIME=4/4
           PULSES_PER_BEAT=4
 
           HH: x1 x1 x1 x1 ...
-          SD: -4 x4 -4 x4
-          BD:
-           x1 -1 -1 -1
-           x1 -1 -1 -1
+          SD: -4 x4 -4 x4 ...
+          BD: ...
 
-        ・トークンは「記号+数値(+^強弱)」
-          - xN, oN, ON, XN : Nステップぶん伸びる音符
-          - -N, rN, RN, _N : Nステップぶんの休符
-          - 強弱は ^p, ^f, ^mf などを末尾に付ける
-            例: x1^p, o2^ff, -4^p
+        - トークン:
+            音符: xN, oN, XN, ON
+            休符: -N, rN, RN, _N
+            N はステップ数（正の整数）
 
-        ・"|" は小節区切りの目印として許可するが、
-          パーサ上は「完全に無視」し、ステップ長に影響させない。
+        - 強弱:
+            トークン末尾に ^pp, ^p, ^mp, ^mf, ^f, ^ff
+            例: x1^f, o2^pp, -4^p
 
-        ・各トラックごとに
-            合計ステップ数 % bar_steps == 0
-          でなければエラーにする。
+        - "|" は小節区切りマーカーとして許可されるが、ステップには数えない。
+
+        - ファイル末尾などに置く検算ブロック:
+
+            %%CHECK:
+              Track01_Total = 64
+              Track02_Total = 64
+              Track03_Total = 64
+              Bars_Total    = 4
+              Steps_Per_Bar = 16
+            %%ENDCHECK
+
+          は、パーサ側では完全に無視する。
         """
         print("[INFO] Score.from_text: parsing text score...")
 
@@ -167,22 +121,25 @@ class Score:
         title: Optional[str] = None
 
         lines = text.splitlines()
-
         current_track_name: Optional[str] = None
         current_track_tokens: List[str] = []
 
-        # --------------------------------------------------
-        # トラック1本ぶんを確定させて Track にする関数
-        # --------------------------------------------------
+        # CHECK ブロック無視用フラグ
+        in_check_block = False
+
+        # ----------------------------
+        # トラックを確定
+        # ----------------------------
         def flush_current_track():
-            nonlocal current_track_name, current_track_tokens, tracks, time_sig, pulses_per_beat
+            nonlocal current_track_name, current_track_tokens, tracks
 
             if current_track_name is None:
                 return
 
             if time_sig is None or pulses_per_beat is None:
-                raise ValueError("ヘッダー情報 (TIME, PULSES_PER_BEAT) が不足しています。")
+                raise ValueError("TIME または PULSES_PER_BEAT が不足しています。")
 
+            bar_steps = time_sig[0] * pulses_per_beat
             tokens = current_track_tokens
             events: List[NoteEvent] = []
             current_step = 0
@@ -192,19 +149,19 @@ class Score:
                 if not token:
                     continue
 
-                # "|" は完全無視
+                # 小節区切りは完全無視
                 if token == "|":
                     continue
 
+                # 強弱
                 dynamic = "mf"
                 if "^" in token:
                     base, dyn = token.split("^", 1)
                     token = base.strip()
                     dyn = dyn.strip()
-                    if dyn in ("pp", "p", "mp", "mf", "f", "ff"):
-                        dynamic = dyn
-                    else:
+                    if dyn not in ("pp", "p", "mp", "mf", "f", "ff"):
                         raise ValueError(f"未知の強弱記号 '{dyn}' in '{token_raw}'")
+                    dynamic = dyn
 
                 if not token:
                     continue
@@ -212,35 +169,33 @@ class Score:
                 kind = token[0]
                 length_str = token[1:]
                 if not length_str.isdigit():
-                    raise ValueError(f"トークン '{token_raw}' の長さが数値ではありません。")
+                    raise ValueError(f"トークン '{token_raw}' の長さが整数ではありません。")
+
                 length = int(length_str)
                 if length <= 0:
-                    raise ValueError(f"トークン '{token_raw}' の長さは正の整数である必要があります。")
+                    raise ValueError(f"トークン '{token_raw}' の長さが正の整数ではありません。")
 
                 if kind in ("x", "X", "o", "O"):
-                    events.append(
-                        NoteEvent(
-                            start_step=current_step,
-                            length_steps=length,
-                            symbol=kind,
-                            dynamic=dynamic,
-                        )
-                    )
+                    symbol = kind
                 elif kind in ("-", "r", "R", "_"):
-                    events.append(
-                        NoteEvent(
-                            start_step=current_step,
-                            length_steps=length,
-                            symbol="rest",
-                            dynamic=dynamic,
-                        )
-                    )
+                    symbol = "rest"
                 else:
-                    raise ValueError(f"未知のトークン種別 '{kind}' in '{token_raw}'")
+                    raise ValueError(f"未知のトークン種 '{kind}' in '{token_raw}'")
+
+                events.append(
+                    NoteEvent(
+                        start_step=current_step,
+                        length_steps=length,
+                        symbol=symbol,
+                        dynamic=dynamic,
+                    )
+                )
 
                 current_step += length
 
-            bar_steps = time_sig[0] * pulses_per_beat
+            # 小節チェック
+            if bar_steps <= 0:
+                raise ValueError("1小節あたりのステップ数(bar_steps) が 0 以下です。")
 
             if current_step % bar_steps != 0:
                 full_bars = current_step // bar_steps
@@ -248,7 +203,7 @@ class Score:
                 raise ValueError(
                     f"トラック {current_track_name}: 合計 {current_step} ステップは "
                     f"1小節 {bar_steps} の整数倍ではありません。"
-                    f" → {full_bars}小節分 + 余り {remainder} ステップになっています。"
+                    f" → {full_bars}小節分 + 余り {remainder}"
                 )
 
             if current_step == 0:
@@ -261,27 +216,40 @@ class Score:
                         f"{current_step} ステップ = {bars} 小節分として解釈します。"
                     )
 
-            # ★ ここでソートしてから 1 回だけ append する
+            # 開始ステップでソートして追加
             events.sort(key=lambda e: e.start_step)
-            tracks.append(Track(name=current_track_name, events=events))
+            tracks.append(Track(current_track_name, events))
 
             current_track_name = None
             current_track_tokens = []
 
-
-
-        # ---- 行走査 ----
-        for raw_line in lines:
-            # 行末コメントを除去
-            # 例: "HH: x1 x1 x1  # comment" → "HH: x1 x1 x1"
-            line_no_comment = raw_line.split("#", 1)[0]
-            line = line_no_comment.strip()
+        # ================================
+        # 行解析
+        # ================================
+        for raw in lines:
+            # 行末コメント除去
+            raw_no_comment = raw.split("#", 1)[0]
+            line = raw_no_comment.strip()
             if not line:
                 continue
 
-            # ヘッダー類
+            # CHECK ブロック開始
+            if line.startswith("%%CHECK:"):
+                in_check_block = True
+                continue
+
+            # CHECK ブロック終了
+            if line.startswith("%%ENDCHECK"):
+                in_check_block = False
+                continue
+
+            # CHECK ブロック内は完全無視
+            if in_check_block:
+                continue
+
+            # ヘッダー
             if line.startswith("FILENAME="):
-                # Score では使わない（GUI側でファイル名に利用）
+                # Score 側では使わない
                 continue
             if line.startswith("TITLE="):
                 title = line.split("=", 1)[1].strip()
@@ -290,43 +258,40 @@ class Score:
                 tempo = int(line.split("=", 1)[1])
                 continue
             if line.startswith("TIME="):
-                ts_str = line.split("=", 1)[1].strip()
-                num_str, den_str = ts_str.split("/")
-                time_sig = (int(num_str), int(den_str))
+                ts = line.split("=", 1)[1]
+                a, b = ts.split("/")
+                time_sig = (int(a), int(b))
                 continue
             if line.startswith("PULSES_PER_BEAT="):
                 pulses_per_beat = int(line.split("=", 1)[1])
                 continue
 
-            # トラック行 or 継続行
+            # トラック行
             if ":" in line:
-                # 旧トラックをフラッシュ
+                # 既存トラックを確定
                 flush_current_track()
-
-                name, pat = line.split(":", 1)
+                name, data = line.split(":", 1)
                 current_track_name = name.strip()
-                current_track_tokens = []
-                pattern = pat.strip()
-                if pattern:
-                    current_track_tokens.extend(pattern.split())
+                current_track_tokens = data.strip().split()
+                continue
 
-            else:
-                # 直前に開始したトラックの継続行として扱う
-                if current_track_name is not None:
-                    current_track_tokens.extend(line.split())
-                else:
-                    # どのトラックにも属していない謎行 → 無視
-                    continue
+            # トラック継続行
+            if current_track_name is not None:
+                current_track_tokens.extend(line.split())
+                continue
 
-        # 最終トラックをフラッシュ
+            # それ以外の行は無視
+            continue
+
+        # 最後のトラックをフラッシュ
         flush_current_track()
 
         if tempo is None or time_sig is None or pulses_per_beat is None:
-            raise ValueError("ヘッダー情報 (TEMPO, TIME, PULSES_PER_BEAT) が不足しています。")
+            raise ValueError("TEMPO, TIME, PULSES_PER_BEAT のいずれかが不足しています。")
 
         print(
             f"[INFO] Score.from_text: parsed tempo={tempo}, "
-            f"time={time_sig[0]}/{time_sig[1]}, pulses={pulses_per_beat}, tracks={len(tracks)}"
+            f"time={time_sig}, pulses={pulses_per_beat}, tracks={len(tracks)}"
         )
 
         return cls(
@@ -342,48 +307,43 @@ class Score:
     # ------------------------
     @classmethod
     def create_default_score(cls) -> "Score":
-        tempo = 100
-        time_sig = (4, 4)
-        pulses_per_beat = 4
-        bar_steps = time_sig[0] * pulses_per_beat  # 16
+        """
+        アプリ初回起動時などに使うデフォルト譜面。
+        4小節 = 64ステップになるように組んだ
+        「ちょっとだけプロっぽい」デモパターン。
+        """
+        text = """FILENAME=DefaultGroove_Showcase.txt
+TITLE=Default Groove Showcase
+TEMPO=96
+TIME=4/4
+PULSES_PER_BEAT=4
 
-        # HH: 16ステップ全部を x1 で埋める（1小節）
-        hh_events: List[NoteEvent] = []
-        for s in range(bar_steps):
-            hh_events.append(
-                NoteEvent(start_step=s, length_steps=1, symbol="x", dynamic="mf")
-            )
+# Bar1: 基本の16分HH＋キック＆バックビート
+# Bar2: HHの強弱バリエーション
+# Bar3: SDのロール気味フィル
+# Bar4: BDのフィルで締め
 
-        # SD: 2拍目と4拍目にだけスネア、その間は休符で埋めて 16 ステップにそろえる
-        sd_events: List[NoteEvent] = []
-        # 1拍目: 4ステップ休符
-        sd_events.append(NoteEvent(start_step=0, length_steps=4, symbol="rest", dynamic="mf"))
-        # 2拍目: スネア1ステップ＋残り3ステップ休符
-        sd_events.append(NoteEvent(start_step=4, length_steps=1, symbol="o", dynamic="f"))
-        sd_events.append(NoteEvent(start_step=5, length_steps=3, symbol="rest", dynamic="mf"))
-        # 3拍目: 4ステップ休符
-        sd_events.append(NoteEvent(start_step=8, length_steps=4, symbol="rest", dynamic="mf"))
-        # 4拍目: スネア1ステップ＋残り3ステップ休符
-        sd_events.append(NoteEvent(start_step=12, length_steps=1, symbol="o", dynamic="f"))
-        sd_events.append(NoteEvent(start_step=13, length_steps=3, symbol="rest", dynamic="mf"))
+HH: x1 x1 x1 x1  x1 x1 x1 x1  x1 x1 x1 x1  x1 x1 x1 x1
+    x1^f x1^p x1^p x1^p  x1^f x1^p x1^p x1^p  x1^f x1^p x1^p x1^p  x1^f x1^p x1^p x1^p
+    x2 x2 x2 x2  x2 x2 x2 x2
+    x4 x4 x4 x4
 
-        # BD: 1拍目と3拍目にキック、それ以外は休符で埋めて16ステップ
-        bd_events: List[NoteEvent] = []
-        bd_events.append(NoteEvent(start_step=0, length_steps=1, symbol="o", dynamic="mf"))
-        bd_events.append(NoteEvent(start_step=1, length_steps=3, symbol="rest", dynamic="mf"))
-        bd_events.append(NoteEvent(start_step=8, length_steps=1, symbol="o", dynamic="mf"))
-        bd_events.append(NoteEvent(start_step=9, length_steps=7, symbol="rest", dynamic="mf"))
+SD: -4 x1 -3  -4 x1 -3
+    -1 x1^pp -2  -1 x1^mf -2  -1 x1^pp -2  -1 x1^f -2
+    x1^p x1^p x1^p x1^p  x2^mf x2^mf  x1^f x1^f x1^f x1^f  x2^ff x2^ff
+    -12 x1^f x1^f x1^ff x1^ff
 
-        tracks = [
-            Track("HH", hh_events),
-            Track("SD", sd_events),
-            Track("BD", bd_events),
-        ]
+BD: x1 -3 x1 -3 x1 -3 x1 -3
+    x4 -4 x4 -4
+    -2 x1 -1 x1 -4 x1 -2 x1 -2 x1
+    x2 x2 x2 x2 -8
 
-        return cls(
-            tempo=tempo,
-            time_signature=time_sig,
-            pulses_per_beat=pulses_per_beat,
-            tracks=tracks,
-            title="Default Pattern",
-        )
+%%CHECK:
+  Track01_Total = 64
+  Track02_Total = 64
+  Track03_Total = 64
+  Bars_Total    = 4
+  Steps_Per_Bar = 16
+%%ENDCHECK
+"""
+        return cls.from_text(text)
