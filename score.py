@@ -278,33 +278,43 @@ class Score:
                 )
 
             events: List[NoteEvent] = []
-            if tokens:
-                start_idx = 0
-                current_symbol, current_dyn = tokens[0]
-                length = 1
-                for idx, (symbol, dyn) in enumerate(tokens[1:], start=1):
-                    if symbol == current_symbol and dyn == current_dyn:
-                        length += 1
-                    else:
-                        events.append(
-                            NoteEvent(
-                                start_step=start_idx,
-                                length_steps=length,
-                                symbol=current_symbol,
-                                dynamic=current_dyn,
-                            )
+            idx = 0
+            while idx < len(tokens):
+                symbol, dyn = tokens[idx]
+
+                # 叩きものは 1 ステップ単位で必ずトリガーさせる。
+                if symbol != "rest":
+                    events.append(
+                        NoteEvent(
+                            start_step=idx,
+                            length_steps=1,
+                            symbol=symbol,
+                            dynamic=dyn,
                         )
-                        start_idx = idx
-                        current_symbol = symbol
-                        current_dyn = dyn
-                        length = 1
+                    )
+                    idx += 1
+                    continue
+
+                # 休符は可能な限りまとめるが、拍(pulses_per_beat) をまたがない長さに抑える。
+                start_idx = idx
+                length = 0
+                max_len_in_beat = pulses_per_beat - (start_idx % pulses_per_beat)
+
+                while (
+                    idx < len(tokens)
+                    and tokens[idx][0] == "rest"
+                    and tokens[idx][1] == dyn
+                    and length < max_len_in_beat
+                ):
+                    length += 1
+                    idx += 1
 
                 events.append(
                     NoteEvent(
                         start_step=start_idx,
                         length_steps=length,
-                        symbol=current_symbol,
-                        dynamic=current_dyn,
+                        symbol="rest",
+                        dynamic=dyn,
                     )
                 )
 
