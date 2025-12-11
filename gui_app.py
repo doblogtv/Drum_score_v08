@@ -3,7 +3,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from typing import Optional, Dict, List
 import os
-import json
+from config import APP_VERSION, SHARED_CONFIG_KEYS, load_config, save_config
 
 from score import Score
 from synth import DrumSynth
@@ -13,26 +13,7 @@ from exporter import render_score_to_wav, render_score_to_movie  # WAV & Movie å
 from draw_mixin import ScoreDrawMixin
 from playback_mixin import PlaybackMixin
 
-APP_VERSION = "0.7"
-CONFIG_FILE = os.path.join(os.getcwd(), "drum_app_config.json")
-
-
-def load_config() -> dict:
-    if not os.path.exists(CONFIG_FILE):
-        return {}
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def save_config(config: dict):
-    try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+CONFIG_KEYS = SHARED_CONFIG_KEYS
 
 
 class DrumApp(ScoreDrawMixin, PlaybackMixin):
