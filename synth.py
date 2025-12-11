@@ -1,7 +1,67 @@
-import numpy as np
-import simpleaudio as sa
-import wave
+"""Drum synthesizer utilities.
+
+このモジュールは外部ライブラリに強く依存していましたが、
+実行環境に numpy / simpleaudio が存在しない場合でも落ちずに
+動作するようフォールバック処理を追加しています。
+"""
+
+import array
+import math
 import os
+import random
+import wave
+
+try:
+    import numpy as np  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - 環境依存
+    np = None
+
+try:
+    import simpleaudio as sa  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - 環境依存
+    sa = None
+
+
+def _linspace(start: float, stop: float, num: int, endpoint: bool = True):
+    if num <= 0:
+        return [] if np is None else np.array([], dtype=float)
+    if np is not None:
+        return np.linspace(start, stop, num, endpoint=endpoint)
+
+    if endpoint and num > 1:
+        step = (stop - start) / (num - 1)
+    else:
+        step = (stop - start) / num
+    return [start + step * i for i in range(num)]
+
+
+def _exp(values):
+    if np is not None:
+        return np.exp(values)
+    return [math.exp(v) for v in values]
+
+
+def _sin(values):
+    if np is not None:
+        return np.sin(values)
+    return [math.sin(v) for v in values]
+
+
+def _cumsum(values):
+    if np is not None:
+        return np.cumsum(values)
+    acc = []
+    total = 0.0
+    for v in values:
+        total += v
+        acc.append(total)
+    return acc
+
+
+def _clip(values, min_value: float, max_value: float):
+    if np is not None:
+        return np.clip(values, min_value, max_value)
+    return [max(min(v, max_value), min_value) for v in values]
 
 
 class DrumSynth:
@@ -24,6 +84,11 @@ class DrumSynth:
 
         # サンプルレート（WAV も基本この SR を想定）
         self.sample_rate = 44100
+
+        if np is None:
+            print("[WARN] numpy が見つかりません。簡易的な純Python処理に切り替えます。")
+        if sa is None:
+            print("[WARN] simpleaudio が見つかりません。再生は無効化されます。")
 
         # 各楽器の WAV サンプル（外部読み込み用）
         self.wav_hh = None
@@ -80,8 +145,13 @@ class DrumSynth:
                     f"expected {self.sample_rate}. ピッチを変えずのリサンプルは未実装です。"
                 )
             frames = wf.readframes(wf.getnframes())
-            data = np.frombuffer(frames, dtype=np.int16).astype(np.float32)
-            data /= 32767.0  # 正規化（-1.0〜1.0）
+            if np is not None:
+                data = np.frombuffer(frames, dtype=np.int16).astype(np.float32)
+                data /= 32767.0  # 正規化（-1.0〜1.0）
+            else:
+                raw = array.array("h")
+                raw.frombytes(frames)
+                data = [sample / 32767.0 for sample in raw]
 
         if target.upper() == "HH":
             self.wav_hh = data
@@ -103,32 +173,42 @@ class DrumSynth:
         """
 
         # ---- HH / SD 共通の時間軸（0.2 秒くらい）
-        t = np.linspace(0, 0.2, int(self.sample_rate * 0.2), endpoint=False)
+        t = _linspace(0, 0.2, int(self.sample_rate * 0.2), endpoint=False)
 
         # ハイハット（ノイズ＋速い減衰）
-        noise_hh = np.random.uniform(-1, 1, len(t))
-        env_hh = np.exp(-t * 60.0)  # かなり速く減衰
-        self.internal_hh = (noise_hh * env_hh * 0.5).astype(np.float32)
+        if np is not None:
+            noise_hh = np.random.uniform(-1, 1, len(t))
+            env_hh = np.exp(-t * 60.0)  # かなり速く減衰
+            self.internal_hh = (noise_hh * env_hh * 0.5).astype(np.float32)
+        else:
+            noise_hh = [random.uniform(-1, 1) for _ in range(len(t))]
+            env_hh = [math.exp(-v * 60.0) for v in t]
+            self.internal_hh = [float(n * e * 0.5) for n, e in zip(noise_hh, env_hh)]
 
         # スネア（ノイズ＋少しゆっくり目の減衰）
-        noise_sd = np.random.uniform(-1, 1, len(t))
-        env_sd = np.exp(-t * 35.0)
-        self.internal_sd = (noise_sd * env_sd * 0.6).astype(np.float32)
+        if np is not None:
+            noise_sd = np.random.uniform(-1, 1, len(t))
+            env_sd = np.exp(-t * 35.0)
+            self.internal_sd = (noise_sd * env_sd * 0.6).astype(np.float32)
+        else:
+            noise_sd = [random.uniform(-1, 1) for _ in range(len(t))]
+            env_sd = [math.exp(-v * 35.0) for v in t]
+            self.internal_sd = [float(n * e * 0.6) for n, e in zip(noise_sd, env_sd)]
 
         # ---- BD 用の時間軸（0.35〜0.4 秒）
         bd_duration = 0.38  # 固定長（テンポ・音価に依存しない）
         n_bd = int(self.sample_rate * bd_duration)
-        t_bd = np.linspace(0, bd_duration, n_bd, endpoint=False)
+        t_bd = _linspace(0, bd_duration, n_bd, endpoint=False)
 
         # キックの基音周波数（かなり低め）
         f_start = 90.0   # 最初ちょっと高め
         f_end = 50.0     # 少し低く下がる
         # 線形に周波数を落としていく（軽いピッチダウン）
-        freq_env = np.linspace(f_start, f_end, n_bd)
+        freq_env = _linspace(f_start, f_end, n_bd)
 
         # 周波数→位相積分
-        phase = 2.0 * np.pi * np.cumsum(freq_env) / self.sample_rate
-        tone = np.sin(phase)
+        phase = [2.0 * math.pi * v / self.sample_rate for v in _cumsum(freq_env)]
+        tone = _sin(phase)
 
         # 簡易 ADSR エンベロープ
         attack_time = 0.005   # 5 ms
@@ -144,44 +224,57 @@ class DrumSynth:
         if release_samps < 0:
             release_samps = 0
 
-        env_bd = np.zeros(n_bd, dtype=np.float32)
+        env_bd = [0.0] * n_bd if np is None else np.zeros(n_bd, dtype=np.float32)
 
         # Attack
         if attack_samps > 0:
-            env_bd[:attack_samps] = np.linspace(0.0, 1.0, attack_samps, endpoint=False)
+            attack_values = _linspace(0.0, 1.0, attack_samps, endpoint=False)
+            env_bd[:attack_samps] = attack_values
         # Decay
         if decay_samps > 0:
-            env_bd[attack_samps:attack_samps + decay_samps] = np.linspace(
-                1.0, sustain_level, decay_samps, endpoint=False
-            )
+            decay_values = _linspace(1.0, sustain_level, decay_samps, endpoint=False)
+            env_bd[attack_samps:attack_samps + decay_samps] = decay_values
         # Release
         if release_samps > 0:
-            env_bd[attack_samps + decay_samps:] = np.linspace(
-                sustain_level, 0.0, release_samps, endpoint=False
-            )
+            release_values = _linspace(sustain_level, 0.0, release_samps, endpoint=False)
+            env_bd[attack_samps + decay_samps:] = release_values
 
-        bd = tone * env_bd
-
-        # ちょっとだけクリップ防止のために余裕を持たせる
-        self.internal_bd = (bd * 0.9).astype(np.float32)
+        if np is not None:
+            bd = tone * env_bd
+            self.internal_bd = (bd * 0.9).astype(np.float32)
+        else:
+            bd = [t * e for t, e in zip(tone, env_bd)]
+            self.internal_bd = [float(v * 0.9) for v in bd]
 
     # -----------------------------------------------------------
     # 1音鳴らす（polyphonic）
     # -----------------------------------------------------------
-    def _play_sample(self, waveform: np.ndarray, volume: float):
+    def _play_sample(self, waveform, volume: float):
         """
         simpleaudio を使って polyphonic に再生する
         """
         if waveform is None:
             return
 
+        if sa is None:
+            if not getattr(self, "_warned_no_audio", False):
+                print("[WARN] simpleaudio が無いため再生できません。WAV 出力のみ利用できます。")
+                self._warned_no_audio = True
+            return
+
         # 音量調整
-        w = waveform * volume
-        w = np.clip(w, -1.0, 1.0)
-        w16 = (w * 32767).astype(np.int16)
+        if np is not None:
+            w = waveform * volume
+            w = _clip(w, -1.0, 1.0)
+            w16 = (w * 32767).astype(np.int16)
+            raw_buffer = w16
+        else:
+            w = [max(-1.0, min(1.0, float(v) * volume)) for v in waveform]
+            ints = [max(-32768, min(32767, int(val * 32767))) for val in w]
+            raw_buffer = array.array("h", ints)
 
         play_obj = sa.play_buffer(
-            w16,
+            raw_buffer,
             num_channels=1,
             bytes_per_sample=2,
             sample_rate=self.sample_rate,

@@ -157,8 +157,15 @@ def render_score_to_movie(
     - capture_frame(step_index) で譜面キャンバスをフレーム化
     - moviepy で音声と合成して動画を書き出す
     """
-    from moviepy import ImageSequenceClip, AudioFileClip
-    import numpy as np
+    try:
+        from moviepy import ImageSequenceClip, AudioFileClip
+    except ModuleNotFoundError as exc:  # pragma: no cover - 環境依存
+        raise RuntimeError("moviepy が必要です。`pip install moviepy` を実行してください。") from exc
+
+    try:
+        import numpy as np
+    except ModuleNotFoundError as exc:  # pragma: no cover - 環境依存
+        raise RuntimeError("numpy が必要です。`pip install numpy` を実行してください。") from exc
 
     if loop_count <= 0:
         loop_count = 1
