@@ -278,33 +278,17 @@ class Score:
                 )
 
             events: List[NoteEvent] = []
-            if tokens:
-                start_idx = 0
-                current_symbol, current_dyn = tokens[0]
-                length = 1
-                for idx, (symbol, dyn) in enumerate(tokens[1:], start=1):
-                    if symbol == current_symbol and dyn == current_dyn:
-                        length += 1
-                    else:
-                        events.append(
-                            NoteEvent(
-                                start_step=start_idx,
-                                length_steps=length,
-                                symbol=current_symbol,
-                                dynamic=current_dyn,
-                            )
-                        )
-                        start_idx = idx
-                        current_symbol = symbol
-                        current_dyn = dyn
-                        length = 1
-
+            for idx, (symbol, dyn) in enumerate(tokens):
+                # v0.8.0 では「1 トークン = 1 ステップ」が絶対ルール。
+                # 以前は同じトークンが連続すると 1 つの長い音符イベントにまとめていたが、
+                # これだと HH などの連打が「1小節に 1 回だけ鳴る」状態になってしまう。
+                # 毎ステップで確実にトリガーするよう、常に length_steps=1 のイベントを作る。
                 events.append(
                     NoteEvent(
-                        start_step=start_idx,
-                        length_steps=length,
-                        symbol=current_symbol,
-                        dynamic=current_dyn,
+                        start_step=idx,
+                        length_steps=1,
+                        symbol=symbol,
+                        dynamic=dyn,
                     )
                 )
 
