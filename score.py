@@ -4,7 +4,7 @@ from typing import List, Tuple, Optional
 
 # ==========================================================
 # Drum Score Player v0.7.2
-# テキスト譜面ルール ＋ CHECK ブロック無視
+# テキスト譜面ルール ＋ CHECK ブロック検証
 # ==========================================================
 
 
@@ -110,7 +110,7 @@ class Score:
               Steps_Per_Bar = 16
             %%ENDCHECK
 
-          は、パーサ側では完全に無視する。
+          は必須。記載された数値と解析結果が一致しない場合はエラーを返す。
         """
         print("[INFO] Score.from_text: parsing text score...")
 
@@ -124,8 +124,13 @@ class Score:
         current_track_name: Optional[str] = None
         current_track_tokens: List[str] = []
 
-        # CHECK ブロック無視用フラグ
+        # CHECK ブロックの解析
         in_check_block = False
+        check_values = {}
+        check_block_found = False
+
+        # トラックごとの合計ステップ数を記録して、CHECK と突き合わせる
+        track_total_steps = {}
 
         # ----------------------------
         # トラックを確定
@@ -206,6 +211,9 @@ class Score:
                     f" → {full_bars}小節分 + 余り {remainder}"
                 )
 
+            # CHECK ブロック用に合計を記録
+            track_total_steps[current_track_name] = current_step
+
             if current_step == 0:
                 print(f"[WARN] トラック {current_track_name}: イベントがありません（空トラック）。")
             else:
@@ -235,6 +243,7 @@ class Score:
 
             # CHECK ブロック開始
             if line.startswith("%%CHECK:"):
+                check_block_found = True
                 in_check_block = True
                 continue
 
@@ -243,8 +252,19 @@ class Score:
                 in_check_block = False
                 continue
 
-            # CHECK ブロック内は完全無視
+            # CHECK ブロック内を解析
             if in_check_block:
+                if "=" not in line:
+                    raise ValueError("CHECK ブロックの行は 'KEY = VALUE' 形式である必要があります。")
+
+                key, value_str = line.split("=", 1)
+                key = key.strip()
+                value_str = value_str.strip()
+
+                if not value_str.isdigit():
+                    raise ValueError(f"CHECK ブロックの数値が整数ではありません: '{line}'")
+
+                check_values[key] = int(value_str)
                 continue
 
             # ヘッダー
@@ -289,18 +309,73 @@ class Score:
         if tempo is None or time_sig is None or pulses_per_beat is None:
             raise ValueError("TEMPO, TIME, PULSES_PER_BEAT のいずれかが不足しています。")
 
-        print(
-            f"[INFO] Score.from_text: parsed tempo={tempo}, "
-            f"time={time_sig}, pulses={pulses_per_beat}, tracks={len(tracks)}"
-        )
+        if not check_block_found:
+            raise ValueError(
+                "CHECK ブロックが見つかりません。譜面末尾に検算用のブロックを追加してください。"
+            )
 
-        return cls(
+        score = cls(
             tempo=tempo,
             time_signature=time_sig,
             pulses_per_beat=pulses_per_beat,
             tracks=tracks,
             title=title,
         )
+
+        # CHECK ブロックと実測値の突き合わせ
+        if not check_values:
+            raise ValueError("CHECK ブロックに検算用の数値がありません。'HH_Total = 64' のように記述してください。")
+
+        errors = []
+        track_total_keys = {f"{name}_Total" for name in track_total_steps}
+
+        # 1. トラックごとの合計ステップ数
+        for track_name, total in track_total_steps.items():
+            key = f"{track_name}_Total"
+            if key not in check_values:
+                errors.append(f"CHECK ブロックに {key} の記載がありません。")
+            elif check_values[key] != total:
+                expected = check_values[key]
+                errors.append(
+                    f"{key}: CHECK={expected} と解析結果 {total} が一致しません。"
+                )
+
+        # 2. CHECK に存在するがトラックとして見つからない項目
+        unknown_track_keys = [
+            key
+            for key in check_values.keys()
+            if key.endswith("_Total") and key not in track_total_keys
+        ]
+        for key in unknown_track_keys:
+            errors.append(f"CHECK ブロックの {key} は対応するトラックが見つかりません。")
+
+        # 3. Bars_Total / Steps_Per_Bar の整合性
+        if "Bars_Total" in check_values:
+            expected_bars = check_values["Bars_Total"]
+            actual_bars = score.bars
+            if expected_bars != actual_bars:
+                errors.append(
+                    f"Bars_Total: CHECK={expected_bars} と解析結果 {actual_bars} が一致しません。"
+                )
+
+        if "Steps_Per_Bar" in check_values:
+            expected_spb = check_values["Steps_Per_Bar"]
+            actual_spb = score.bar_steps
+            if expected_spb != actual_spb:
+                errors.append(
+                    f"Steps_Per_Bar: CHECK={expected_spb} と解析結果 {actual_spb} が一致しません。"
+                )
+
+        if errors:
+            error_text = "\n".join(errors)
+            raise ValueError(f"CHECK ブロックの検算に失敗しました:\n{error_text}")
+
+        print(
+            f"[INFO] Score.from_text: parsed tempo={tempo}, "
+            f"time={time_sig}, pulses={pulses_per_beat}, tracks={len(tracks)}"
+        )
+
+        return score
 
     # ------------------------
     # デフォルト譜面生成（簡易テスト用）
