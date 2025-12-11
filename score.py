@@ -278,19 +278,43 @@ class Score:
                 )
 
             events: List[NoteEvent] = []
-            for idx, (symbol, dyn) in enumerate(tokens):
-                # v0.8.0 では「1 トークン = 1 ステップ」が絶対ルール。
-                # 以前は同じトークンが連続すると 1 つの長い音符イベントにまとめていたが、
-                # これだと HH などの連打が「1小節に 1 回だけ鳴る」状態になってしまう。
-                # 毎ステップで確実にトリガーするよう、常に length_steps=1 のイベントを作る。
+            idx = 0
+
+            while idx < len(tokens):
+                symbol, dyn = tokens[idx]
+
+                if symbol != "rest":
+                    # 叩く音符は常に 1 ステップ固定でトリガーする
+                    events.append(
+                        NoteEvent(
+                            start_step=idx,
+                            length_steps=1,
+                            symbol=symbol,
+                            dynamic=dyn,
+                        )
+                    )
+                    idx += 1
+                    continue
+
+                # 休符は「できるだけまとめて、拍をまたがない」ルールに従い、
+                # 同一拍内の連続休符を 1 つのイベントにまとめる。
+                beat_remaining = pulses_per_beat - (idx % pulses_per_beat)
+                rest_len = 0
+                while idx + rest_len < len(tokens) and rest_len < beat_remaining:
+                    next_symbol, _ = tokens[idx + rest_len]
+                    if next_symbol != "rest":
+                        break
+                    rest_len += 1
+
                 events.append(
                     NoteEvent(
                         start_step=idx,
-                        length_steps=1,
-                        symbol=symbol,
+                        length_steps=rest_len,
+                        symbol="rest",
                         dynamic=dyn,
                     )
                 )
+                idx += rest_len
 
             tracks.append(Track(track_name, events))
 
