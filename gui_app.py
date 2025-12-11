@@ -78,19 +78,15 @@ class DrumApp(ScoreDrawMixin, PlaybackMixin):
 
             # Score とサウンド設定
             self.score: Score = Score.create_default_score()
-            self.sound_settings = self.config_data.get(
-                "sound_settings",
-                {
-                    "base_gain_hh": 0.4,
-                    "base_gain_sd": 0.3,
-                    "base_gain_bd": 0.8,
-                    "dyn_gain": {
-                        0: 0.0,
-                        1: 0.4,
-                        2: 0.8,
-                        3: 1.1,
-                    },
-                },
+            self.default_sound_settings = {
+                "base_gain_hh": 0.4,
+                "base_gain_sd": 0.3,
+                "base_gain_bd": 0.8,
+                "dyn_gain": {0: 0.0, 1: 0.4, 2: 0.8, 3: 1.1},
+            }
+
+            self.sound_settings = self._merge_sound_settings(
+                self.config_data.get("sound_settings")
             )
 
             # カスタムサンプルのパス
@@ -138,6 +134,27 @@ class DrumApp(ScoreDrawMixin, PlaybackMixin):
             self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
             self.redraw_all()
+
+        def _merge_sound_settings(self, settings: Optional[dict]) -> dict:
+            base = self.default_sound_settings
+            if not isinstance(settings, dict):
+                return {k: v if not isinstance(v, dict) else dict(v) for k, v in base.items()}
+
+            merged = {**base, **settings}
+
+            dyn_default = base.get("dyn_gain", {})
+            dyn_gain_raw = merged.get("dyn_gain", {})
+            dyn_gain = {}
+            if isinstance(dyn_gain_raw, dict):
+                for k, v in dyn_gain_raw.items():
+                    try:
+                        ik = int(k)
+                        dyn_gain[ik] = float(v)
+                    except (ValueError, TypeError):
+                        continue
+            merged["dyn_gain"] = {**dyn_default, **dyn_gain}
+
+            return merged
 
         # ----------------------------
         # トラックミュート用 BooleanVar 再構築
@@ -517,6 +534,11 @@ class DrumApp(ScoreDrawMixin, PlaybackMixin):
             hh_gain = tk.DoubleVar(value=self.sound_settings.get("base_gain_hh", 0.4))
             sd_gain = tk.DoubleVar(value=self.sound_settings.get("base_gain_sd", 0.3))
             bd_gain = tk.DoubleVar(value=self.sound_settings.get("base_gain_bd", 0.8))
+
+            dyn_gain_map = self.sound_settings.get("dyn_gain", {})
+            dyn1_gain = tk.DoubleVar(value=dyn_gain_map.get(1, 0.4))
+            dyn2_gain = tk.DoubleVar(value=dyn_gain_map.get(2, 0.8))
+            dyn3_gain = tk.DoubleVar(value=dyn_gain_map.get(3, 1.1))
             save_dir_var = tk.StringVar(value=self.save_dir)
             movie_dir_var = tk.StringVar(value=self.movie_output_dir)
             loop_record_var = tk.IntVar(value=self.loop_record_count)
@@ -539,9 +561,12 @@ class DrumApp(ScoreDrawMixin, PlaybackMixin):
             add_row("HH ベースゲイン", hh_gain, 0, kind="str")
             add_row("SD ベースゲイン", sd_gain, 1, kind="str")
             add_row("BD ベースゲイン", bd_gain, 2, kind="str")
+            add_row("pp/p 音量倍率", dyn1_gain, 3, kind="str")
+            add_row("mp/mf 音量倍率", dyn2_gain, 4, kind="str")
+            add_row("f/ff 音量倍率", dyn3_gain, 5, kind="str")
 
             # 保存ディレクトリ
-            ent_dir = add_row("譜面保存ディレクトリ", save_dir_var, 3, kind="str")
+            ent_dir = add_row("譜面保存ディレクトリ", save_dir_var, 6, kind="str")
 
             def browse_dir():
                 cur = save_dir_var.get() or os.getcwd()
@@ -554,10 +579,10 @@ class DrumApp(ScoreDrawMixin, PlaybackMixin):
                     save_dir_var.set(path)
 
             btn_browse = tk.Button(win, text="参照...", command=browse_dir)
-            btn_browse.grid(row=3, column=2, padx=5, pady=5)
+            btn_browse.grid(row=6, column=2, padx=5, pady=5)
 
             # ムービー出力ディレクトリ
-            ent_movie = add_row("ムービー出力フォルダ", movie_dir_var, 4, kind="str")
+            ent_movie = add_row("ムービー出力フォルダ", movie_dir_var, 7, kind="str")
 
             def browse_movie_dir():
                 cur = movie_dir_var.get() or os.getcwd()
@@ -570,10 +595,10 @@ class DrumApp(ScoreDrawMixin, PlaybackMixin):
                     movie_dir_var.set(path)
 
             btn_browse_movie = tk.Button(win, text="参照...", command=browse_movie_dir)
-            btn_browse_movie.grid(row=4, column=2, padx=5, pady=5)
+            btn_browse_movie.grid(row=7, column=2, padx=5, pady=5)
 
             # ループ録画回数
-            add_row("Loop録画回数（ムービー出力/WAV出力）", loop_record_var, 5, kind="int")
+            add_row("Loop録画回数（ムービー出力/WAV出力）", loop_record_var, 8, kind="int")
 
             # 再生時の Loop チェック（ここへ移動）
             loop_chk = tk.Checkbutton(
@@ -581,12 +606,12 @@ class DrumApp(ScoreDrawMixin, PlaybackMixin):
                 text="Loop再生（終端で先頭に戻る）",
                 variable=self.loop_var,
             )
-            loop_chk.grid(row=6, column=1, padx=5, pady=5, sticky="w")
+            loop_chk.grid(row=9, column=1, padx=5, pady=5, sticky="w")
 
             # 各トラックの WAV ファイル指定
-            ent_hh_wav = add_row("HH WAVファイル", hh_wav_var, 7, kind="str")
-            ent_sd_wav = add_row("SD WAVファイル", sd_wav_var, 8, kind="str")
-            ent_bd_wav = add_row("BD WAVファイル", bd_wav_var, 9, kind="str")
+            ent_hh_wav = add_row("HH WAVファイル", hh_wav_var, 10, kind="str")
+            ent_sd_wav = add_row("SD WAVファイル", sd_wav_var, 11, kind="str")
+            ent_bd_wav = add_row("BD WAVファイル", bd_wav_var, 12, kind="str")
 
             def browse_wav(var: tk.StringVar):
                 cur = var.get() or os.getcwd()
@@ -600,26 +625,35 @@ class DrumApp(ScoreDrawMixin, PlaybackMixin):
                     var.set(path)
 
             btn_browse_hh = tk.Button(win, text="参照...", command=lambda: browse_wav(hh_wav_var))
-            btn_browse_hh.grid(row=7, column=2, padx=5, pady=5)
+            btn_browse_hh.grid(row=10, column=2, padx=5, pady=5)
 
             btn_browse_sd = tk.Button(win, text="参照...", command=lambda: browse_wav(sd_wav_var))
-            btn_browse_sd.grid(row=8, column=2, padx=5, pady=5)
+            btn_browse_sd.grid(row=11, column=2, padx=5, pady=5)
 
             btn_browse_bd = tk.Button(win, text="参照...", command=lambda: browse_wav(bd_wav_var))
-            btn_browse_bd.grid(row=9, column=2, padx=5, pady=5)
+            btn_browse_bd.grid(row=12, column=2, padx=5, pady=5)
 
             def on_save():
                 try:
                     new_hh = float(hh_gain.get())
                     new_sd = float(sd_gain.get())
                     new_bd = float(bd_gain.get())
+                    new_dyn1 = float(dyn1_gain.get())
+                    new_dyn2 = float(dyn2_gain.get())
+                    new_dyn3 = float(dyn3_gain.get())
                 except ValueError:
-                    messagebox.showerror("エラー", "ベースゲインには数値を入力してください。")
+                    messagebox.showerror("エラー", "ゲインには数値を入力してください。")
                     return
 
                 self.sound_settings["base_gain_hh"] = new_hh
                 self.sound_settings["base_gain_sd"] = new_sd
                 self.sound_settings["base_gain_bd"] = new_bd
+                self.sound_settings["dyn_gain"] = {
+                    0: 0.0,
+                    1: new_dyn1,
+                    2: new_dyn2,
+                    3: new_dyn3,
+                }
 
                 new_dir = save_dir_var.get().strip()
                 if not new_dir:
@@ -674,7 +708,7 @@ class DrumApp(ScoreDrawMixin, PlaybackMixin):
                 messagebox.showinfo("情報", "設定を保存しました。")
 
             save_btn = tk.Button(win, text="保存", command=on_save)
-            save_btn.grid(row=12, column=0, columnspan=3, pady=10)
+            save_btn.grid(row=14, column=0, columnspan=3, pady=10)
 
         # ----------------------------
         # 終了処理

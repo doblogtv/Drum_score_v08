@@ -13,12 +13,14 @@ class DrumSynth:
     """
 
     def __init__(self, sound_settings=None):
-        self.sound_settings = sound_settings or {
+        self.default_sound_settings = {
             "base_gain_hh": 0.4,
             "base_gain_sd": 0.3,
             "base_gain_bd": 0.8,
             "dyn_gain": {0: 0.0, 1: 0.4, 2: 0.8, 3: 1.1},
         }
+
+        self.sound_settings = self._merge_sound_settings(sound_settings)
 
         # サンプルレート（WAV も基本この SR を想定）
         self.sample_rate = 44100
@@ -33,6 +35,31 @@ class DrumSynth:
 
         # 内蔵合成（WAV が無い時のバックアップ音源）
         self._build_internal_synth()
+
+    def _merge_sound_settings(self, settings):
+        base = self.default_sound_settings
+        if not isinstance(settings, dict):
+            return {k: (dict(v) if isinstance(v, dict) else v) for k, v in base.items()}
+
+        merged = {**base, **settings}
+
+        # dyn_gain はキーが文字列でも受け付ける（JSON 保存互換）
+        dyn_default = dict(base.get("dyn_gain", {}))
+        dyn_gain_raw = merged.get("dyn_gain", {})
+        dyn_gain = {}
+        for k, v in dyn_gain_raw.items():
+            try:
+                ik = int(k)
+                dyn_gain[ik] = float(v)
+            except (ValueError, TypeError):
+                continue
+        merged["dyn_gain"] = {**dyn_default, **dyn_gain}
+
+        return merged
+
+    def update_params(self, sound_settings):
+        """設定変更を反映（ベースゲイン・ダイナミクスゲイン）"""
+        self.sound_settings = self._merge_sound_settings(sound_settings)
 
     # -----------------------------------------------------------
     # WAV 読み込み
