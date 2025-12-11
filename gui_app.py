@@ -8,12 +8,12 @@ import json
 from score import Score
 from synth import DrumSynth
 from exporter import render_score_to_wav, render_score_to_movie  # WAV & Movie 出力専用モジュール
+from config import APP_VERSION
 
 # 描画系 / 再生系の Mixin
 from draw_mixin import ScoreDrawMixin
 from playback_mixin import PlaybackMixin
 
-APP_VERSION = "0.7"
 CONFIG_FILE = os.path.join(os.getcwd(), "drum_app_config.json")
 
 
