@@ -1,7 +1,7 @@
 import os
 import json
 
-APP_VERSION = "0.6"
+APP_VERSION = "0.7"
 
 CONFIG_FILE = os.path.join(os.getcwd(), "drum_app_config.json")
 
