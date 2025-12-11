@@ -296,25 +296,57 @@ class Score:
                     idx += 1
                     continue
 
-                # 休符は「できるだけまとめて、拍をまたがない」ルールに従い、
-                # 同一拍内の連続休符を 1 つのイベントにまとめる。
-                beat_remaining = pulses_per_beat - (idx % pulses_per_beat)
-                rest_len = 0
-                while idx + rest_len < len(tokens) and rest_len < beat_remaining:
-                    next_symbol, _ = tokens[idx + rest_len]
+                # 休符は「できるだけまとめる」方針だが、1 拍を越えた連結は
+                # 4 分休符が 2 拍続く場合（= 2 分休符相当）や 1 小節丸ごと
+                # 休符になる場合（全休符）に限り許容する。
+                # これは譜例の慣習に合わせ、拍頭で隣り合う休符同士は
+                # まとめて表記するのが望ましいため。
+                total_rest_run = 0
+                while idx + total_rest_run < len(tokens):
+                    next_symbol, _ = tokens[idx + total_rest_run]
                     if next_symbol != "rest":
                         break
-                    rest_len += 1
+                    total_rest_run += 1
 
-                events.append(
-                    NoteEvent(
-                        start_step=idx,
-                        length_steps=rest_len,
-                        symbol="rest",
-                        dynamic=dyn,
+                rest_remaining = total_rest_run
+                while rest_remaining > 0:
+                    beat_pos = idx % pulses_per_beat
+                    beat_remaining = pulses_per_beat - beat_pos
+                    bar_pos = idx % bar_steps
+                    bar_remaining = bar_steps - bar_pos
+
+                    if beat_pos == 0:
+                        full_beats_in_bar = bar_remaining // pulses_per_beat
+                        available_full_beats = min(
+                            rest_remaining // pulses_per_beat, full_beats_in_bar
+                        )
+
+                        if available_full_beats >= time_sig[0]:
+                            # 全休符（拍数にかかわらず小節全体を 1 つに）
+                            chunk_beats = time_sig[0]
+                        elif available_full_beats >= 2:
+                            # 隣り合う 2 拍の 4 分休符は 2 分休符相当としてまとめる
+                            chunk_beats = 2
+                        else:
+                            chunk_beats = 1
+
+                        chunk_steps = min(
+                            chunk_beats * pulses_per_beat, rest_remaining, bar_remaining
+                        )
+                    else:
+                        # 拍をまたがないよう、残りの拍分だけまとめる
+                        chunk_steps = min(rest_remaining, beat_remaining)
+
+                    events.append(
+                        NoteEvent(
+                            start_step=idx,
+                            length_steps=chunk_steps,
+                            symbol="rest",
+                            dynamic=dyn,
+                        )
                     )
-                )
-                idx += rest_len
+                    idx += chunk_steps
+                    rest_remaining -= chunk_steps
 
             tracks.append(Track(track_name, events))
 
